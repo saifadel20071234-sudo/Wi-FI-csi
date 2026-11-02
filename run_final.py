@@ -134,16 +134,26 @@ def flash_receiver(port: str):
         return False
 
 def verify_ai_model():
-    """Checks if model files exist, trains them if missing."""
-    model_path = os.path.join(ROOT_DIR, "dashboard", "csi_model.pkl")
-    if not os.path.exists(model_path):
+    """Verify the complete model bundle and stop on a failed training run."""
+    dashboard_dir = os.path.join(ROOT_DIR, "dashboard")
+    required = ["csi_model.pkl", "scaler.pkl", "feature_cols.pkl"]
+    missing = [name for name in required if not os.path.exists(os.path.join(dashboard_dir, name))]
+    if missing:
         print("\n[*] جاري التحقق من موديل الذكاء الاصطناعي...")
         train_script = os.path.join(ROOT_DIR, "ml", "ml_model.py")
         if os.path.exists(train_script):
-            subprocess.run([sys.executable, train_script])
-            print("[+] تم تجهيز موديل الذكاء الاصطناعي بنجاح!")
+            result = subprocess.run([sys.executable, train_script])
+            still_missing = [name for name in required if not os.path.exists(os.path.join(dashboard_dir, name))]
+            if result.returncode == 0 and not still_missing:
+                print("[+] تم تجهيز موديل الذكاء الاصطناعي بنجاح!")
+                return True
+            print(f"❌ فشل تجهيز الموديل. الملفات الناقصة: {', '.join(still_missing or missing)}")
+            return False
+        print("❌ ملف تدريب الموديل غير موجود.")
+        return False
     else:
-        print("[+] موديل الذكاء الاصطناعي متدرب وجاهز (Accuracy 100%).")
+        print("[+] ملفات موديل الذكاء الاصطناعي مكتملة وجاهزة.")
+        return True
 
 def test_live_csi_stream(port: str):
     """Quick diagnostic to read raw CSI frames from serial."""
@@ -223,7 +233,9 @@ def main():
     selected_port = detect_or_wait_port()
     
     # 2. Check AI Model
-    verify_ai_model()
+    if not verify_ai_model():
+        print("\nلا يمكن تشغيل الداش بورد قبل إصلاح تدريب الموديل أعلاه.")
+        return
     
     # 3. Main Menu
     print("\n" + "="*80)
@@ -249,7 +261,10 @@ def main():
         run_dashboard(selected_port)
     elif choice == "4":
         train_script = os.path.join(ROOT_DIR, "ml", "ml_model.py")
-        subprocess.run([sys.executable, train_script])
+        result = subprocess.run([sys.executable, train_script])
+        if result.returncode != 0:
+            print("\n❌ فشلت إعادة التدريب؛ راجع رسائل الخطأ قبل تشغيل الداش بورد.")
+            return
         input("\nاضغط Enter لتشغيل الداش بورد الآن...")
         run_dashboard(selected_port)
     elif choice == "5":

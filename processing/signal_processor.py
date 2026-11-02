@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import glob
 import os
+from pathlib import Path
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -33,18 +34,24 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 NUM_SUB     = 64
 WINDOW_SIZE = 30    # 3 seconds at ~10Hz
 HOP_SIZE    = 5     # Fine-grained sliding step (~83.3% overlap) -> Yields 115 samples per class!
+ROOT_DIR    = Path(__file__).resolve().parents[1]
+RAW_DIR     = ROOT_DIR / "data" / "raw"
+DATA_DIR    = ROOT_DIR / "data"
+RESULTS_DIR = ROOT_DIR / "results"
 
 # ============================================
 # 1. تحميل وتجميع كل ملفات CSV
 # ============================================
 def load_all_files(pattern="raw_label*.csv"):
-    files = sorted(glob.glob(pattern))
+    """Load raw captures from the repository, independent of the shell CWD."""
+    files = sorted(RAW_DIR.glob(pattern))
     if not files:
         raise FileNotFoundError(f"No files found matching: {pattern}")
 
     dfs = []
     for f in files:
         df = pd.read_csv(f)
+        df["capture_id"] = Path(f).stem
         print(f"  [+] Loaded: {os.path.basename(f)} -> {len(df)} samples")
         dfs.append(df)
 
@@ -197,37 +204,36 @@ def process_all_advanced(pattern="raw_label*.csv"):
     all_features = []
 
     for label in sorted(df['label'].unique()):
-        label_df = df[df['label'] == label].reset_index(drop=True)
-        csi_matrix = label_df[amp_cols].values.astype(float)
-        rssi       = label_df['rssi'].values.astype(float)
-
-        print(f"\n[*] Processing scenario label {label} ({len(label_df)} raw packets)...")
-
-        # 1. Advanced Denoising
-        csi_filtered = filter_csi_matrix(csi_matrix)
-
-        # 2. Sliding Window with High Resolution (Hop=5 -> 115 samples)
+        label_df = df[df['label'] == label]
         count = 0
-        for start in range(0, len(csi_filtered) - WINDOW_SIZE, HOP_SIZE):
-            end    = start + WINDOW_SIZE
-            window = csi_filtered[start:end]
-            r_win  = rssi[start:end]
-            feats  = extract_advanced_features(window, r_win)
-            feats['label'] = int(label)
-            all_features.append(feats)
-            count += 1
-
+        print(f"\n[*] Processing scenario label {label} ({len(label_df)} raw packets)...")
+        # Filter and window each physical capture separately. Concatenating two
+        # sessions would create artificial windows across their boundary.
+        for capture_id, capture_df in label_df.groupby("capture_id", sort=True):
+            csi_matrix = capture_df[amp_cols].values.astype(float)
+            rssi = capture_df['rssi'].values.astype(float)
+            csi_filtered = filter_csi_matrix(csi_matrix)
+            for start in range(0, len(csi_filtered) - WINDOW_SIZE, HOP_SIZE):
+                end = start + WINDOW_SIZE
+                feats = extract_advanced_features(csi_filtered[start:end], rssi[start:end])
+                feats['label'] = int(label)
+                feats['capture_id'] = capture_id
+                all_features.append(feats)
+                count += 1
         print(f"    -> Successfully extracted {count} high-resolution feature vectors")
 
     features_df = pd.DataFrame(all_features)
-    features_df.to_csv("csi_features.csv", index=False)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    feature_path = DATA_DIR / "csi_features.csv"
+    features_df.to_csv(feature_path, index=False)
 
     print("\n" + "=" * 60)
     print(f"✅ Feature Extraction Complete!")
     print(f"Total Feature Vectors: {len(features_df)}")
     print(f"Features per Vector:   {len(features_df.columns) - 1} (Target: label)")
     print(f"\nBalanced Class Distribution:\n{features_df['label'].value_counts().sort_index()}")
-    print(f"💾 Saved Dataset: csi_features.csv")
+    print(f"💾 Saved Dataset: {feature_path}")
     print("=" * 60)
 
     # توليد الرسوم التوضيحية الأكاديمية
@@ -262,12 +268,12 @@ def generate_high_quality_visualizations(raw_df, features_df, amp_cols):
     axes[1].grid(True, linestyle='--', alpha=0.5)
     axes[1].legend(loc='upper right')
     plt.tight_layout()
-    plt.savefig('filter_comparison.png', dpi=200)
+    plt.savefig(RESULTS_DIR / 'filter_comparison.png', dpi=200)
     plt.close()
     print("  [+] Saved: filter_comparison.png")
 
     # 2. PCA 2D/3D Cluster Separation Plot
-    X = features_df.drop(columns=['label'])
+    X = features_df.drop(columns=['label', 'capture_id'])
     y = features_df['label']
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
@@ -298,7 +304,7 @@ def generate_high_quality_visualizations(raw_df, features_df, amp_cols):
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.legend(frameon=True, facecolor='white', framealpha=0.9)
     plt.tight_layout()
-    plt.savefig('pca_clusters.png', dpi=200)
+    plt.savefig(RESULTS_DIR / 'pca_clusters.png', dpi=200)
     plt.close()
     print("  [+] Saved: pca_clusters.png")
 
@@ -314,7 +320,7 @@ def generate_high_quality_visualizations(raw_df, features_df, amp_cols):
     plt.title('High-Value Feature Correlation Matrix', fontsize=13, fontweight='bold')
     plt.xticks(rotation=45, ha='right')
     plt.tight_layout()
-    plt.savefig('feature_correlation_heatmap.png', dpi=200)
+    plt.savefig(RESULTS_DIR / 'feature_correlation_heatmap.png', dpi=200)
     plt.close()
     print("  [+] Saved: feature_correlation_heatmap.png")
 
@@ -323,7 +329,7 @@ def generate_high_quality_visualizations(raw_df, features_df, amp_cols):
 # ============================================
 def run_comprehensive_benchmark(features_df):
     print("\n🧠 Running Comprehensive Multi-Model Benchmark...")
-    X = features_df.drop(columns=['label'])
+    X = features_df.drop(columns=['label', 'capture_id'])
     y = features_df['label']
 
     X_train, X_test, y_train, y_test = train_test_split(
@@ -384,7 +390,7 @@ def run_comprehensive_benchmark(features_df):
     plt.ylabel('Ground Truth Label')
     plt.xticks(rotation=30, ha='right')
     plt.tight_layout()
-    plt.savefig('confusion_matrix_benchmark.png', dpi=200)
+    plt.savefig(RESULTS_DIR / 'confusion_matrix_benchmark.png', dpi=200)
     plt.close()
     print("  [+] Saved: confusion_matrix_benchmark.png")
 

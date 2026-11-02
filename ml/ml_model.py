@@ -21,7 +21,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
+from sklearn.model_selection import train_test_split, StratifiedGroupKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, f1_score
@@ -55,14 +55,36 @@ def train_and_evaluate():
     df = pd.read_csv(DATA_PATH)
     print(f"[*] Loaded dataset: {df.shape[0]} samples across {df.shape[1]-1} features.")
 
-    feature_cols = [c for c in df.columns if c != "label"]
+    feature_cols = [c for c in df.columns if c not in ("label", "capture_id")]
     X = df[feature_cols].values
     y = df["label"].values.astype(int)
 
-    # 2. Train / Test Split
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
+    # 2. Hold out complete physical captures when the dataset has enough of
+    # them. Splitting overlapping windows at random leaks near-duplicate CSI
+    # packets into the test set and produces misleadingly high accuracy.
+    evaluation_note = "Within-capture split only; collect at least 2 sessions per class for a valid field test."
+    capture_ids = df.get("capture_id")
+    if capture_ids is not None:
+        sessions_per_label = df.groupby("label")["capture_id"].nunique()
+        if sessions_per_label.min() >= 2:
+            held_out = {
+                label: sorted(group["capture_id"].unique())[-1]
+                for label, group in df.groupby("label")
+            }
+            test_mask = np.array([capture == held_out[label] for capture, label in zip(capture_ids, y)])
+            X_train, X_test = X[~test_mask], X[test_mask]
+            y_train, y_test = y[~test_mask], y[test_mask]
+            evaluation_note = "Held-out physical capture per class (recommended)."
+        else:
+            print("[!] WARNING: only one physical capture exists for one or more classes.")
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42, stratify=y
+            )
+    else:
+        print("[!] WARNING: dataset has no capture_id column; test score is only an exploratory within-capture score.")
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
 
     # 3. Feature Scaling
     scaler = StandardScaler()
@@ -81,9 +103,15 @@ def train_and_evaluate():
     model.fit(X_train_scaled, y_train)
 
     # 5. Cross-Validation
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    cv_scores = cross_val_score(model, X_train_scaled, y_train, cv=cv, scoring="accuracy")
-    print(f"[+] 5-Fold Cross Validation Accuracy: {cv_scores.mean()*100:.2f}% (+/- {cv_scores.std()*100:.2f}%)")
+    if capture_ids is not None and df.groupby("label")["capture_id"].nunique().min() >= 3:
+        train_groups = capture_ids[~test_mask]
+        folds = min(5, int(df.groupby("label")["capture_id"].nunique().min() - 1))
+        cv = StratifiedGroupKFold(n_splits=folds, shuffle=True, random_state=42)
+        cv_scores = cross_val_score(model, X_train_scaled, y_train, groups=train_groups, cv=cv, scoring="accuracy")
+        print(f"[+] Grouped CV Accuracy: {cv_scores.mean()*100:.2f}% (+/- {cv_scores.std()*100:.2f}%)")
+    else:
+        cv_scores = np.array([np.nan])
+        print("[!] Grouped cross-validation skipped: collect at least 3 captures per class.")
 
     # 6. Test Evaluation
     y_pred = model.predict(X_test_scaled)
@@ -144,8 +172,9 @@ def train_and_evaluate():
         "n_features": len(feature_cols),
         "feature_names": feature_cols,
         "test_accuracy": round(float(acc), 4),
-        "cv_mean_accuracy": round(float(cv_scores.mean()), 4),
-        "cv_std_accuracy": round(float(cv_scores.std()), 4),
+        "cv_mean_accuracy": None if np.isnan(cv_scores).all() else round(float(cv_scores.mean()), 4),
+        "cv_std_accuracy": None if np.isnan(cv_scores).all() else round(float(cv_scores.std()), 4),
+        "evaluation_note": evaluation_note,
         "label_mapping": LABEL_NAMES
     }
     with open(meta_path, "w", encoding="utf-8") as f:

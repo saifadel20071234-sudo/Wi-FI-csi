@@ -121,7 +121,12 @@ def main():
     parser = argparse.ArgumentParser(description="ESP32 Wi-Fi CSI data collector")
     parser.add_argument("--port", help="Serial port, e.g. /dev/cu.usbserial-XXXX")
     parser.add_argument("--list-ports", action="store_true", help="List available serial ports")
-    parser.add_argument("--output", default="datasets", help="Folder for CSV files")
+    default_output = Path(__file__).resolve().parents[1] / "data" / "raw"
+    parser.add_argument(
+        "--output",
+        default=str(default_output),
+        help="Folder for CSV files (default: project data/raw)",
+    )
     args = parser.parse_args()
 
     if args.list_ports:

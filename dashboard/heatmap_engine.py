@@ -3,14 +3,19 @@
    HIGH-PRECISION HUMAN THERMAL RADIATION & SPATIAL TRACKING ENGINE
                      Wi-Fi CSI Human Sensing System
 ================================================================================
-Simulates and renders high-definition anisotropic human thermal signatures on
-a calibrated 5m x 5m room grid with:
+Renders high-definition thermal signatures on a calibrated 5m x 5m room grid
+from CSI position estimates with:
 - Dual-Gaussian anatomical human footprint (Head core + Torso radiation).
 - Decaying thermal wake trails (motion momentum & trajectory history).
 - RF Line-of-Sight (LOS) Fresnel beam and radar metric rings.
-- Smooth exponential physics interpolation (Zero-jitter tracking).
+- Smooth exponential interpolation (zero-jitter tracking).
+
+The renderer never invents a walking route.  It only moves when the runtime
+passes a new CSI-derived estimate.
 ================================================================================
 """
+
+import time
 
 import numpy as np
 import matplotlib
@@ -60,7 +65,7 @@ class SmoothThermalTracker:
         
         # Velocity and momentum
         self.speed = 0.0
-        self.move_angle = 0.0
+        self.last_update = time.monotonic()
         
         # Thermal intensity (0.0 = completely empty, 1.0 = fully present)
         self.curr_intensity = 0.0
@@ -76,41 +81,48 @@ class SmoothThermalTracker:
             1: (2.5, 2.5, 1.0),    # Center (direct LOS interference)
             2: (3.75, 2.5, 1.0),   # Right Zone
             3: (1.25, 2.5, 1.0),   # Left Zone
-            4: (2.5, 2.6, 1.0),    # Continuous Motion
+            4: (2.5, 2.5, 1.0),    # Moving: retain last CSI-derived estimate
         }
 
-    def update_target(self, label: int):
-        """Maps AI classification label to continuous spatial target coordinates."""
-        if label in self.anchor_positions:
-            tx, ty, target_int = self.anchor_positions[label]
-            self.target_intensity = target_int
-            
-            if label == 4:
-                # Dynamic Walking Motion: Orbiting trajectory with smooth acceleration
-                self.move_angle += 0.22
-                self.target_x = 2.5 + 1.25 * np.cos(self.move_angle)
-                self.target_y = 2.5 + 0.90 * np.sin(self.move_angle * 1.4)
-            elif label != 0:
-                self.target_x = tx
-                self.target_y = ty
+    def update_target(self, label: int, estimated_position=None):
+        """Accept a CSI-derived estimate; never generate a simulated trajectory."""
+        if label not in self.anchor_positions:
+            return
 
-    def step_physics(self, lerp_rate=0.20):
-        """Smooth exponential interpolation to eliminate discrete teleports."""
+        _, _, target_intensity = self.anchor_positions[label]
+        self.target_intensity = target_intensity
+        if label == 0:
+            return
+
+        if estimated_position is not None:
+            x, y = estimated_position
+            self.target_x = float(np.clip(x, 0.0, self.w))
+            self.target_y = float(np.clip(y, 0.0, self.h))
+        elif label in (1, 2, 3):
+            x, y, _ = self.anchor_positions[label]
+            self.target_x, self.target_y = x, y
+        # For label 4, lack of a CSI estimate means retain the last known
+        # target rather than draw a fake orbit.
+
+    def step_physics(self, dt: float, lerp_rate=0.42):
+        """Smooth CSI estimates and calculate speed in metres per second."""
         self.prev_x = self.curr_x
         self.prev_y = self.curr_y
         
         # Smooth position update
-        self.curr_x += (self.target_x - self.curr_x) * lerp_rate
-        self.curr_y += (self.target_y - self.curr_y) * lerp_rate
+        factor = min(1.0, lerp_rate * max(dt, 0.01) * 6.0)
+        self.curr_x += (self.target_x - self.curr_x) * factor
+        self.curr_y += (self.target_y - self.curr_y) * factor
         
         # Smooth intensity fade in / fade out
-        self.curr_intensity += (self.target_intensity - self.curr_intensity) * 0.16
+        self.curr_intensity += (self.target_intensity - self.curr_intensity) * min(1.0, 0.9 * max(dt, 0.01))
         
         # Calculate instant spatial velocity (m/frame)
         dist = np.hypot(self.curr_x - self.prev_x, self.curr_y - self.prev_y)
-        self.speed = 0.85 * self.speed + 0.15 * (dist * 15.0)  # normalized ~ m/s
+        instant_speed = dist / max(dt, 0.01)
+        self.speed = 0.70 * self.speed + 0.30 * instant_speed
 
-    def render_thermal_frame(self, label: int, live_rssi: float = -55.0):
+    def render_thermal_frame(self, label: int, live_rssi: float = -55.0, estimated_position=None):
         """
         Renders an ultra-high quality, dark thermal spatial radar frame:
         - Decaying motion wake trail.
@@ -119,8 +131,11 @@ class SmoothThermalTracker:
         - Hardware node markers (TX & RX).
         - Telemetry coordinates HUD.
         """
-        self.update_target(label)
-        self.step_physics()
+        now = time.monotonic()
+        dt = min(max(now - self.last_update, 0.01), 1.0)
+        self.last_update = now
+        self.update_target(label, estimated_position)
+        self.step_physics(dt)
         
         # 1. Decay previous frame (creates realistic fluid thermal wake)
         self.heat_canvas *= 0.85
@@ -139,9 +154,7 @@ class SmoothThermalTracker:
             core_dy = (self.Y - self.curr_y) / 0.22
             core_heat = np.exp(-0.5 * (core_dx**2 + core_dy**2)) * self.curr_intensity * 0.95
             
-            # C) Dynamic RF / Breathing Micro-fluctuation
-            wobble = 1.0 + 0.03 * np.sin(self.move_angle * 3.5)
-            self.heat_canvas += (torso_heat + core_heat) * wobble
+            self.heat_canvas += torso_heat + core_heat
             
         # 3. Spatial Gaussian Smoothing & Dynamic Normalization
         smoothed = gaussian_filter(self.heat_canvas, sigma=1.1)
