@@ -285,6 +285,49 @@ with col_telemetry:
     st.markdown("##### 📶 64 Subcarrier Spectrum")
     spectrum_placeholder = st.empty()
 
+# --- Serial Connection Singleton (Thread-Safe across Streamlit reruns) ---
+@st.cache_resource
+def get_serial_holder():
+    class SerialHolder:
+        def __init__(self):
+            self.ser = None
+            self.port = None
+            self.baud = None
+
+        def get_connection(self, port, baud):
+            if self.ser is not None and getattr(self.ser, "is_open", False):
+                if self.port == port and self.baud == baud:
+                    return self.ser
+                self.close()
+
+            last_err = None
+            for attempt in range(3):
+                try:
+                    s = serial.Serial(port, baud, timeout=0.1)
+                    s.dtr = False
+                    s.rts = False
+                    time.sleep(0.15)
+                    s.reset_input_buffer()
+                    self.ser = s
+                    self.port = port
+                    self.baud = baud
+                    return self.ser
+                except Exception as e:
+                    last_err = e
+                    time.sleep(0.3)
+            raise last_err
+
+        def close(self):
+            if self.ser is not None:
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
+                self.ser = None
+                self.port = None
+
+    return SerialHolder()
+
 # --- Hardware Start / Stop Toggle ---
 col_btn1, col_btn2 = st.columns([1, 1])
 with col_btn1:
@@ -294,6 +337,7 @@ with col_btn2:
 
 if stop_btn:
     st.session_state.live_running = False
+    get_serial_holder().close()
 
 if start_btn:
     st.session_state.live_running = True
@@ -304,15 +348,13 @@ if st.session_state.live_running:
         st.error("Cannot start tracking: Model artifacts are missing!")
         st.stop()
 
+    holder = get_serial_holder()
     try:
-        ser = serial.Serial(selected_port, baud_rate, timeout=0.1)
-        ser.dtr = False
-        ser.rts = False
-        time.sleep(0.1)
-        ser.reset_input_buffer()
+        ser = holder.get_connection(selected_port, baud_rate)
     except Exception as e:
         st.error(f"Failed to open port {selected_port}: {e}")
         st.session_state.live_running = False
+        holder.close()
         st.stop()
 
     window_buffer = deque(maxlen=WINDOW_SIZE)
@@ -426,7 +468,8 @@ if st.session_state.live_running:
     except Exception as e:
         st.error(f"Hardware Streaming Interrupted: {e}")
     finally:
-        ser.close()
+        if not st.session_state.live_running:
+            holder.close()
 
 else:
     # Idle State: Render initial dark room canvas
