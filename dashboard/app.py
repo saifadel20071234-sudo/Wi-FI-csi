@@ -217,7 +217,7 @@ def parse_csi_serial_line(line: str):
 if "tracker" not in st.session_state:
     st.session_state.tracker = SmoothThermalTracker(room_width=5.0, room_height=5.0, resolution=75)
 if "live_running" not in st.session_state:
-    st.session_state.live_running = False
+    st.session_state.live_running = True  # Auto-start live stream immediately on launch
 
 # --- Sidebar: Hardware Controls Only ---
 with st.sidebar:
@@ -300,6 +300,9 @@ if st.session_state.live_running:
 
     try:
         ser = serial.Serial(selected_port, baud_rate, timeout=0.1)
+        ser.dtr = False
+        ser.rts = False
+        time.sleep(0.1)
         ser.reset_input_buffer()
     except Exception as e:
         st.error(f"Failed to open port {selected_port}: {e}")
