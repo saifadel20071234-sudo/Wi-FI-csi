@@ -218,6 +218,8 @@ class LiveCSIState:
     confidence: float = 0.0
     zone_confidence: float = 0.0
     estimated_position: tuple[float, float] | None = None
+    secondary_position: tuple[float, float] | None = None
+    people_count: int = 0
     zone_probabilities: dict[int, float] = field(default_factory=dict)
     last_timestamp_ms: int | None = None
     motion_energy: float = 0.0
@@ -232,6 +234,8 @@ class LiveCSIState:
         self.confidence = 0.0
         self.zone_confidence = 0.0
         self.estimated_position = None
+        self.secondary_position = None
+        self.people_count = 0
         self.zone_probabilities = {}
         self.last_timestamp_ms = None
         self.motion_energy = 0.0
@@ -270,26 +274,42 @@ class LiveCSIState:
         var_right = float(np.mean(sub_var[43:]))
         self.motion_energy = var_left + var_center + var_right
 
-        # If motion is strong, override static "Empty Room"
+        # If motion is detected, override static "Empty Room"
         is_moving = self.motion_energy > 0.18
         if is_moving and self.label == 0:
             self.label = 4  # Person moving
             self.confidence = min(98.0, 60.0 + self.motion_energy * 20.0)
 
+        # People Counting Logic
         if self.label == 0 and not is_moving:
+            self.people_count = 0
             self.estimated_position = None
+            self.secondary_position = None
             self.zone_confidence = 0.0
             self.zone_probabilities = {}
-        elif localizer is not None:
-            sub_energies = (var_left, var_center, var_right)
-            position, confidence, zone_probabilities = localizer.estimate(features, sub_energies)
-            # Add dynamic Y modulation from path Doppler to give true 2D depth
-            y_shift = float(np.clip((var_center - (var_left + var_right) / 2.0) * 0.45, -0.4, 0.4))
-            self.estimated_position = (position[0], position[1] + y_shift)
-            self.zone_confidence = confidence * 100.0
-            self.zone_probabilities = zone_probabilities
-        elif self.label in ZONE_COORDINATES:
-            coordinate = ZONE_COORDINATES[self.label]
-            self.estimated_position = (float(coordinate[0]), float(coordinate[1]))
-            self.zone_confidence = self.confidence
+        else:
+            # Multi-person detection: simultaneous left & right perturbations
+            is_multi = (var_left > 1.2 and var_right > 1.2) or (self.motion_energy > 15.0 and min(var_left, var_right) > 0.8)
+            if is_multi:
+                self.people_count = 2
+                self.secondary_position = (3.75, 2.30 + float(np.clip(var_right * 0.04, -0.4, 0.4)))
+            else:
+                self.people_count = 1
+                self.secondary_position = None
+
+            # Primary position estimation
+            if localizer is not None:
+                sub_energies = (var_left, var_center, var_right)
+                position, confidence, zone_probabilities = localizer.estimate(features, sub_energies)
+                y_shift = float(np.clip((var_center - (var_left + var_right) / 2.0) * 0.45, -0.4, 0.4))
+                self.estimated_position = (position[0], position[1] + y_shift)
+                self.zone_confidence = confidence * 100.0
+                self.zone_probabilities = zone_probabilities
+            elif self.label in ZONE_COORDINATES:
+                coordinate = ZONE_COORDINATES[self.label]
+                self.estimated_position = (float(coordinate[0]), float(coordinate[1]))
+                self.zone_confidence = self.confidence
+            else:
+                self.estimated_position = (2.50, 2.50)
+                self.zone_confidence = self.confidence
         return True

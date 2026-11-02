@@ -6,6 +6,6 @@ pyserial>=3.5
 scikit-learn>=1.5
 scipy>=1.13
 seaborn>=0.13
-streamlit>=1.57
+streamlit>=1.35
 esptool>=4.8
 psutil>=6.0

@@ -28,14 +28,17 @@ static void csi_callback(void *ctx, wifi_csi_info_t *data)
     const uint32_t timestamp_ms =
         (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
     const int num_sub = len / 2;
+    const int output_sub = (num_sub >= 64) ? 64 : num_sub;
+    if (output_sub < 10) return;
 
     // Python script accepts packets containing exactly 64 amplitudes.
     printf("CSI_START,%lu,%d,%d",
-           (unsigned long)timestamp_ms, rssi, num_sub);
+           (unsigned long)timestamp_ms, rssi, output_sub);
 
-    for (int i = 0; i + 1 < len; i += 2) {
-        const float imag = (float)buf[i];
-        const float real = (float)buf[i + 1];
+    for (int i = 0; i < output_sub; i++) {
+        int idx = (i < num_sub) ? (i * 2) : ((i % num_sub) * 2);
+        const float imag = (float)buf[idx];
+        const float real = (float)buf[idx + 1];
         const float amp = sqrtf(real * real + imag * imag);
         printf(",%.2f", amp);
     }
@@ -66,7 +69,11 @@ static void wifi_init_sta(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    ESP_ERROR_CHECK(esp_netif_create_default_wifi_sta() ? ESP_OK : ESP_FAIL);
+    esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
+    if (!sta_netif) {
+        ESP_LOGE(TAG, "Failed to create WiFi STA netif");
+        return;
+    }
 
     wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init_config));

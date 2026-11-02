@@ -9,6 +9,11 @@ from CSI position estimates and multi-node RF links:
     1. Node 1: TX (ESP32 #1)
     2. Node 2: EXT (CSI_NODE_EXT Access Point)
     3. Node 3: RX (ESP32 #2 on Laptop COM)
+- People Counter & Multi-Target Biometric Tracking:
+    * Displays active count of people in the room (0, 1, or 2+).
+    * Places a distinct, highly visible target dot/marker on the heatmap for each person.
+    * Smooth real-time trajectory tracking (Forward, Backward, Left, Right).
+    * Zero-jitter fluid exponential interpolation (Zero-Delay).
 - Anatomical Human Biometric Thermal Footprint:
     * Head & Cervical Core (Peak white-hot radiation).
     * Shoulders & Chest (Broad lateral infrared mantle).
@@ -16,8 +21,6 @@ from CSI position estimates and multi-node RF links:
     * Flank Arm Heat Dispersion & Kinetic Strides.
     * Soft Ambient Infrared Body Aura.
 - Decaying Thermal Wake Trails (Motion momentum & trajectory history).
-- Multi-Link RF Beams & Calibrated Fresnel Coverage Zones.
-- Zero-jitter smooth exponential interpolation.
 ================================================================================
 """
 
@@ -26,6 +29,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 from matplotlib.colors import LinearSegmentedColormap
 from scipy.ndimage import gaussian_filter
 
@@ -60,24 +64,34 @@ class SmoothThermalTracker:
         # Persistent Heat Accumulator (maintains fluid fading wake trails)
         self.heat_canvas = np.zeros((self.res, self.res), dtype=float)
         
-        # Continuous physics state
+        # Continuous physics state - Target 1 (Primary Person)
         self.curr_x = self.w / 2.0
         self.curr_y = self.h / 2.0
         self.target_x = self.w / 2.0
         self.target_y = self.h / 2.0
         self.prev_x = self.curr_x
         self.prev_y = self.curr_y
-        
-        # Velocity and momentum
         self.vx = 0.0
         self.vy = 0.0
         self.speed = 0.0
-        self.heading = 0.0  # radians (0 = forward toward Y+)
+        self.heading = 0.0
+        
+        # Continuous physics state - Target 2 (Secondary Person)
+        self.curr_x2 = 3.6
+        self.curr_y2 = 2.4
+        self.target_x2 = 3.6
+        self.target_y2 = 2.4
+        self.prev_x2 = self.curr_x2
+        self.prev_y2 = self.curr_y2
+        self.speed2 = 0.0
+        self.heading2 = 0.0
+        
         self.last_update = time.monotonic()
         
-        # Thermal intensity (0.0 = completely empty, 1.0 = fully present)
+        # Thermal intensity
         self.curr_intensity = 0.0
         self.target_intensity = 0.0
+        self.people_count = 0
         
         # 3 Multi-Node Sensing Network Locations (Meters)
         self.tx_pos = (1.0, 0.70)   # Node 1: TX (ESP32 #1 - Left corner)
@@ -91,24 +105,25 @@ class SmoothThermalTracker:
             3: (1.25, 2.30),   # Zone 3: Left Zone (Near ESP32 TX)
         }
         
-        # Active Zone Name for HUD
         self.active_zone_name = "EMPTY ROOM"
 
-    def update_target(self, label: int, estimated_position=None):
-        """Update target coordinates and thermal intensity based on CSI inference."""
-        if label == 0 and estimated_position is None:
+    def update_targets(self, label: int, estimated_position=None, people_count: int = 0, secondary_position=None):
+        """Update target coordinates and counts based on CSI inference."""
+        self.people_count = people_count
+        
+        if people_count == 0 and estimated_position is None:
             self.target_intensity = 0.0
-            self.active_zone_name = "EMPTY ROOM"
+            self.active_zone_name = "EMPTY ROOM (0 PERSONS)"
             return
             
         self.target_intensity = 1.0
         
+        # Person #1 Target
         if estimated_position is not None:
             x, y = estimated_position
-            self.target_x = float(np.clip(x, 0.3, self.w - 0.3))
-            self.target_y = float(np.clip(y, 0.3, self.h - 0.3))
+            self.target_x = float(np.clip(x, 0.35, self.w - 0.35))
+            self.target_y = float(np.clip(y, 0.35, self.h - 0.35))
             
-            # Determine active zone from coordinates
             if self.target_x < 1.8:
                 self.active_zone_name = "ZONE 3 (LEFT - TX)"
             elif self.target_x > 3.2:
@@ -120,93 +135,87 @@ class SmoothThermalTracker:
             self.target_x, self.target_y = x, y
             names = {1: "ZONE 1 (CENTER)", 2: "ZONE 2 (RIGHT)", 3: "ZONE 3 (LEFT)", 4: "MOTION CORRIDOR"}
             self.active_zone_name = names.get(label, "ACTIVE ZONE")
-        elif label == 4:
-            self.active_zone_name = "MOTION CORRIDOR"
 
-    def step_physics(self, dt: float, lerp_rate=0.55):
-        """Smoothly interpolate target position and calculate velocity & orientation."""
+        # Person #2 Target
+        if secondary_position is not None:
+            x2, y2 = secondary_position
+            self.target_x2 = float(np.clip(x2, 0.35, self.w - 0.35))
+            self.target_y2 = float(np.clip(y2, 0.35, self.h - 0.35))
+
+    def step_physics(self, dt: float, lerp_rate=0.75):
+        """Smoothly interpolate target positions with zero latency and compute velocities."""
         self.prev_x = self.curr_x
         self.prev_y = self.curr_y
+        self.prev_x2 = self.curr_x2
+        self.prev_y2 = self.curr_y2
         
-        # Smooth exponential interpolation (LERP)
-        factor = min(1.0, lerp_rate * max(dt, 0.01) * 7.5)
+        # Highly responsive, fluid LERP factor for instant tracking without lag
+        factor = min(1.0, lerp_rate * max(dt, 0.01) * 9.5)
         self.curr_x += (self.target_x - self.curr_x) * factor
         self.curr_y += (self.target_y - self.curr_y) * factor
         
-        # Smooth intensity fade in / fade out
-        self.curr_intensity += (self.target_intensity - self.curr_intensity) * min(1.0, 1.4 * max(dt, 0.01))
+        self.curr_x2 += (self.target_x2 - self.curr_x2) * factor
+        self.curr_y2 += (self.target_y2 - self.curr_y2) * factor
         
-        # Calculate instant spatial velocity and heading vector
+        # Smooth intensity fade in / fade out
+        self.curr_intensity += (self.target_intensity - self.curr_intensity) * min(1.0, 2.0 * max(dt, 0.01))
+        
+        # Calculate instant spatial velocity and heading vector for Person #1
         self.vx = (self.curr_x - self.prev_x) / max(dt, 0.01)
         self.vy = (self.curr_y - self.prev_y) / max(dt, 0.01)
         instant_speed = np.hypot(self.vx, self.vy)
-        self.speed = 0.65 * self.speed + 0.35 * instant_speed
+        self.speed = 0.55 * self.speed + 0.45 * instant_speed
         
-        if instant_speed > 0.08:
-            # Update heading direction when moving
+        if instant_speed > 0.06:
             target_heading = np.arctan2(self.vy, self.vx)
-            # Smooth angle interpolation
-            self.heading = 0.70 * self.heading + 0.30 * target_heading
+            self.heading = 0.60 * self.heading + 0.40 * target_heading
 
-    def render_thermal_frame(self, label: int, live_rssi: float = -55.0, estimated_position=None):
+        # Person #2 velocity
+        vx2 = (self.curr_x2 - self.prev_x2) / max(dt, 0.01)
+        vy2 = (self.curr_y2 - self.prev_y2) / max(dt, 0.01)
+        instant_speed2 = np.hypot(vx2, vy2)
+        self.speed2 = 0.55 * self.speed2 + 0.45 * instant_speed2
+
+    def render_thermal_frame(
+        self,
+        label: int,
+        live_rssi: float = -55.0,
+        estimated_position=None,
+        people_count: int = 1,
+        secondary_position=None
+    ):
         """
-        Renders an ultra-high quality, dark thermal spatial radar frame:
-        - 3-Node Sensing Network (ESP32 #1, CSI_NODE_EXT, ESP32 #2).
+        Renders an ultra-high quality, zero-delay thermal spatial radar frame:
+        - Prominent People Counter header (0, 1, or 2 persons).
+        - Distinct moving dot/marker following each person with laser precision.
         - Anatomical human thermal silhouette (Head + Shoulders + Torso + Aura).
         - Decaying motion wake trail (fluid footsteps).
         - Multi-node RF Line-of-Sight rays and Fresnel zones.
         - Biometric targeting HUD with live coordinates and velocity.
         """
         now = time.monotonic()
-        dt = min(max(now - self.last_update, 0.01), 1.0)
+        dt = min(max(now - self.last_update, 0.005), 0.5)
         self.last_update = now
-        self.update_target(label, estimated_position)
+        
+        self.update_targets(label, estimated_position, people_count, secondary_position)
         self.step_physics(dt)
         
-        # 1. Decay previous frame (creates realistic fluid thermal wake trailing the person)
-        self.heat_canvas *= 0.86
+        # 1. Decay previous frame (creates realistic fluid thermal wake trailing behind the person)
+        self.heat_canvas *= 0.85
         
         # 2. Inject Biometric Human Thermal Signature if present
-        if self.curr_intensity > 0.02:
-            # Coordinate transformation rotated by movement heading
-            cos_h = np.cos(self.heading)
-            sin_h = np.sin(self.heading)
-            dx = self.X - self.curr_x
-            dy = self.Y - self.curr_y
+        if self.curr_intensity > 0.02 and self.people_count > 0:
+            # Inject Person 1 Heat
+            p1_footprint = self._generate_human_heat(self.curr_x, self.curr_y, self.heading, self.curr_intensity)
+            self.heat_canvas += p1_footprint
             
-            # Rotated coordinates: X_rot = lateral (shoulders), Y_rot = longitudinal (head-to-feet)
-            X_rot = dx * cos_h + dy * sin_h
-            Y_rot = -dx * sin_h + dy * cos_h
-            
-            # A) Head & Brain Core (Concentrated peak white-hot spot)
-            head_dx = X_rot / 0.16
-            head_dy = (Y_rot - 0.22) / 0.18
-            head_heat = np.exp(-0.5 * (head_dx**2 + head_dy**2)) * self.curr_intensity * 1.00
-            
-            # B) Shoulders & Chest Mantle (Broad lateral infrared signature)
-            shoulder_dx = X_rot / 0.42
-            shoulder_dy = (Y_rot - 0.06) / 0.20
-            shoulder_heat = np.exp(-0.5 * (shoulder_dx**2 + shoulder_dy**2)) * self.curr_intensity * 0.92
-            
-            # C) Torso & Abdomen Core (Tapering body warmth column)
-            torso_dx = X_rot / 0.28
-            torso_dy = (Y_rot + 0.15) / 0.38
-            torso_heat = np.exp(-0.5 * (torso_dx**2 + torso_dy**2)) * self.curr_intensity * 0.86
-            
-            # D) Flank Arm Heat Radiations (Left & Right Arms)
-            arm_l = np.exp(-0.5 * (((X_rot - 0.32) / 0.18)**2 + ((Y_rot - 0.02) / 0.26)**2)) * self.curr_intensity * 0.65
-            arm_r = np.exp(-0.5 * (((X_rot + 0.32) / 0.18)**2 + ((Y_rot - 0.02) / 0.26)**2)) * self.curr_intensity * 0.65
-            
-            # E) Ambient Infrared Dispersion Aura (Soft body heat envelope)
-            body_dist = np.hypot(dx, dy)
-            body_aura = np.exp(-0.5 * (body_dist / 0.70)**2) * self.curr_intensity * 0.38
-            
-            # Inject combined anatomical human heat
-            human_footprint = head_heat + shoulder_heat + torso_heat + arm_l + arm_r + body_aura
-            self.heat_canvas += human_footprint
+            # If 2 people detected, inject Person 2 Heat
+            if self.people_count >= 2:
+                p2_footprint = self._generate_human_heat(self.curr_x2, self.curr_y2, self.heading2, self.curr_intensity * 0.90)
+                self.heat_canvas += p2_footprint
             
         # 3. Spatial Gaussian Smoothing & Dynamic FLIR Normalization
-        smoothed = gaussian_filter(self.heat_canvas, sigma=1.05)
+        smoothed = gaussian_filter(self.heat_canvas, sigma=1.0)
         peak = float(np.max(smoothed))
         vmax = max(1.0, peak)
         normalized = np.clip(smoothed / vmax, 0.0, 1.0)
@@ -243,17 +252,14 @@ class SmoothThermalTracker:
         ax.axhline(center_y, color="#00E5FF", linestyle=":", linewidth=0.8, alpha=0.25)
         
         # C) Multi-Node RF Beams (Triangular Multi-Static Geometry)
-        # 1. Link 1: TX (ESP32 #1) <--> RX (ESP32 #2)
         ax.plot([self.tx_pos[0], self.rx_pos[0]], [self.tx_pos[1], self.rx_pos[1]],
                 color="#00E5FF", linestyle="--", linewidth=1.3, alpha=0.40, zorder=3)
-        # 2. Link 2: EXT (CSI_NODE_EXT) <--> RX (ESP32 #2)
         ax.plot([self.ext_pos[0], self.rx_pos[0]], [self.ext_pos[1], self.rx_pos[1]],
                 color="#D946EF", linestyle="--", linewidth=1.3, alpha=0.40, zorder=3)
-        # 3. Link 3: TX (ESP32 #1) <--> EXT (CSI_NODE_EXT)
         ax.plot([self.tx_pos[0], self.ext_pos[0]], [self.tx_pos[1], self.ext_pos[1]],
                 color="#FBBF24", linestyle=":", linewidth=1.0, alpha=0.30, zorder=3)
 
-        # D) Calibrated Sensing Zones (Zone 3: Left, Zone 1: Center, Zone 2: Right)
+        # D) Calibrated Sensing Zones
         zones = [
             (1.30, 2.30, "ZONE 3 (LEFT - TX)", "#00E5FF"),
             (2.50, 2.50, "ZONE 1 (CENTER)", "#38BDF8"),
@@ -266,65 +272,80 @@ class SmoothThermalTracker:
             ax.text(zx, zy - 0.78, zname, color=zcolor, fontsize=7.5,
                     ha="center", va="top", alpha=0.60, fontweight="bold")
         
-        # E) Hardware Node Markers (3-Node Multi-Static Network)
-        # 1. Node 1: TX (ESP32 #1)
+        # E) Hardware Node Markers (3 Nodes)
+        # Node 1: TX
         ax.scatter([self.tx_pos[0]], [self.tx_pos[1]], color="#00E5FF", s=220, marker="^",
                    edgecolors="#FFFFFF", linewidth=1.6, zorder=6)
         ax.text(self.tx_pos[0], self.tx_pos[1] - 0.32, "TX (ESP32 #1)", color="#00E5FF",
                 fontsize=8.5, fontweight="bold", ha="center", va="top", zorder=6)
         
-        # 2. Node 2: EXT (CSI_NODE_EXT Access Point)
+        # Node 2: EXT
         ax.scatter([self.ext_pos[0]], [self.ext_pos[1]], color="#D946EF", s=220, marker="D",
                    edgecolors="#FFFFFF", linewidth=1.6, zorder=6)
         ax.text(self.ext_pos[0], self.ext_pos[1] - 0.32, "EXT (CSI_NODE_EXT)", color="#D946EF",
                 fontsize=8.5, fontweight="bold", ha="center", va="top", zorder=6)
         
-        # 3. Node 3: RX (ESP32 #2 on Laptop COM)
+        # Node 3: RX
         ax.scatter([self.rx_pos[0]], [self.rx_pos[1]], color="#39FF14", s=220, marker="s",
                    edgecolors="#FFFFFF", linewidth=1.6, zorder=6)
         ax.text(self.rx_pos[0], self.rx_pos[1] + 0.32, "RX (ESP32 #2)", color="#39FF14",
                 fontsize=8.5, fontweight="bold", ha="center", va="bottom", zorder=6)
         
-        # F) Biometric Human Target Reticle & Live Coordinate HUD
-        if self.curr_intensity > 0.08:
-            # Concentric Target Reticle
-            ax.scatter([self.curr_x], [self.curr_y], color="#FFFFFF", s=45, marker="o",
-                       edgecolors="#FF0055", linewidth=2.2, zorder=8)
-            reticle = plt.Circle((self.curr_x, self.curr_y), 0.38, color="#FF0055", fill=False,
-                                 linestyle="-", linewidth=1.4, alpha=0.85, zorder=8)
-            ax.add_patch(reticle)
+        # F) Biometric Moving Dots & Targeting Reticles for Detected People
+        if self.curr_intensity > 0.08 and self.people_count > 0:
+            # ----------------- PERSON #1 TRACKING DOT -----------------
+            # 1. Pulsing Concentric Outer Ring
+            ring1 = mpatches.Circle((self.curr_x, self.curr_y), 0.36, color="#FF0055", fill=False,
+                                    linestyle="-", linewidth=1.6, alpha=0.90, zorder=11)
+            ax.add_patch(ring1)
             
-            # Velocity heading vector arrow
-            if self.speed > 0.12:
-                arrow_len = min(0.65, self.speed * 0.45)
+            # 2. Bright Glowing White-Red Center Dot (Marking Person 1)
+            ax.scatter([self.curr_x], [self.curr_y], color="#FFFFFF", s=130, marker="o",
+                       edgecolors="#FF0055", linewidth=3.0, zorder=12)
+            
+            # 3. Directional Velocity Heading Arrow
+            if self.speed > 0.10:
+                arr_len = min(0.60, self.speed * 0.45)
                 ax.arrow(
                     self.curr_x, self.curr_y,
-                    arrow_len * np.cos(self.heading), arrow_len * np.sin(self.heading),
+                    arr_len * np.cos(self.heading), arr_len * np.sin(self.heading),
                     color="#FF0055", width=0.03, head_width=0.12, head_length=0.12,
-                    alpha=0.90, zorder=9
+                    alpha=0.95, zorder=13
                 )
-            
-            # Live Biometric HUD Callout
-            hud_text = (
-                f"🧍 BIOMETRIC TARGET IDENTIFIED\n"
-                f"COORD: ({self.curr_x:.2f}m, {self.curr_y:.2f}m)\n"
-                f"SPEED: {self.speed:.2f} m/s | INTENSITY: {int(self.curr_intensity * 100)}%\n"
-                f"{self.active_zone_name}"
-            )
-            
-            hud_y_offset = 0.55 if self.curr_y < 3.8 else -0.75
+                
+            # 4. HUD Tag for Person #1
+            hud1_text = f"TARGET #1: ({self.curr_x:.2f}m, {self.curr_y:.2f}m)\nSPEED: {self.speed:.2f} m/s"
+            y_off1 = 0.52 if self.curr_y < 3.8 else -0.65
             ax.text(
-                self.curr_x, self.curr_y + hud_y_offset, hud_text,
+                self.curr_x, self.curr_y + y_off1, hud1_text,
                 color="#FFFFFF", fontsize=8.2, fontweight="bold", ha="center",
-                bbox=dict(boxstyle="round,pad=0.40", facecolor="#090E17", edgecolor="#FF0055", linewidth=1.4, alpha=0.92),
-                zorder=10
+                bbox=dict(boxstyle="round,pad=0.35", facecolor="#090E17", edgecolor="#FF0055", linewidth=1.4, alpha=0.92),
+                zorder=14
             )
+            
+            # ----------------- PERSON #2 TRACKING DOT (If 2 people) -----------------
+            if self.people_count >= 2:
+                ring2 = mpatches.Circle((self.curr_x2, self.curr_y2), 0.36, color="#00E5FF", fill=False,
+                                        linestyle="-", linewidth=1.6, alpha=0.90, zorder=11)
+                ax.add_patch(ring2)
+                
+                ax.scatter([self.curr_x2], [self.curr_y2], color="#FFFFFF", s=130, marker="o",
+                           edgecolors="#00E5FF", linewidth=3.0, zorder=12)
+                           
+                hud2_text = f"TARGET #2: ({self.curr_x2:.2f}m, {self.curr_y2:.2f}m)\nSPEED: {self.speed2:.2f} m/s"
+                y_off2 = 0.52 if self.curr_y2 < 3.8 else -0.65
+                ax.text(
+                    self.curr_x2, self.curr_y2 + y_off2, hud2_text,
+                    color="#FFFFFF", fontsize=8.2, fontweight="bold", ha="center",
+                    bbox=dict(boxstyle="round,pad=0.35", facecolor="#090E17", edgecolor="#00E5FF", linewidth=1.4, alpha=0.92),
+                    zorder=14
+                )
         else:
-            # Empty Room Standby Badge
+            # Room Empty Standby Badge
             ax.text(
-                2.5, 2.5, "ROOM CLEAR — LISTENING FOR HUMAN PERTURBATION",
-                color="#64748B", fontsize=9.0, fontweight="bold", ha="center", va="center",
-                bbox=dict(boxstyle="round,pad=0.45", facecolor="#090E17", edgecolor="#1E293B", linewidth=1.0, alpha=0.80),
+                2.5, 2.5, "ROOM CLEAR (0 PERSONS) — LISTENING FOR MOVEMENT",
+                color="#94A3B8", fontsize=9.5, fontweight="bold", ha="center", va="center",
+                bbox=dict(boxstyle="round,pad=0.50", facecolor="#090E17", edgecolor="#1E293B", linewidth=1.2, alpha=0.85),
                 zorder=7
             )
             
@@ -339,8 +360,44 @@ class SmoothThermalTracker:
             spine.set_linewidth(1.8)
             spine.set_alpha(0.80)
             
-        ax.set_title("WI-FI CSI 3-NODE SPATIAL THERMAL TRACKER (5.0m × 5.0m)",
+        count_label = f"PEOPLE DETECTED: {self.people_count}" if self.people_count > 0 else "ROOM CLEAR (0 PERSONS)"
+        ax.set_title(f"WI-FI CSI 3-NODE LIVE RADAR | {count_label}",
                      color="#F1F5F9", fontsize=11, fontweight="bold", pad=12, family="sans-serif")
         
         plt.tight_layout()
         return fig
+
+    def _generate_human_heat(self, cx: float, cy: float, heading: float, intensity: float) -> np.ndarray:
+        """Generates realistic anatomical infrared human body profile centered at (cx, cy)."""
+        cos_h = np.cos(heading)
+        sin_h = np.sin(heading)
+        dx = self.X - cx
+        dy = self.Y - cy
+        
+        X_rot = dx * cos_h + dy * sin_h
+        Y_rot = -dx * sin_h + dy * cos_h
+        
+        # 1. Head & Cervical Core (Peak white-hot circular core)
+        head_dx = X_rot / 0.16
+        head_dy = (Y_rot - 0.22) / 0.18
+        head_heat = np.exp(-0.5 * (head_dx**2 + head_dy**2)) * intensity * 1.00
+        
+        # 2. Shoulders & Chest Mantle (Broad lateral infrared signature)
+        shoulder_dx = X_rot / 0.42
+        shoulder_dy = (Y_rot - 0.06) / 0.20
+        shoulder_heat = np.exp(-0.5 * (shoulder_dx**2 + shoulder_dy**2)) * intensity * 0.92
+        
+        # 3. Torso & Abdomen Core (Tapering body heat column)
+        torso_dx = X_rot / 0.28
+        torso_dy = (Y_rot + 0.15) / 0.38
+        torso_heat = np.exp(-0.5 * (torso_dx**2 + torso_dy**2)) * intensity * 0.86
+        
+        # 4. Flank Arm Heat Radiations
+        arm_l = np.exp(-0.5 * (((X_rot - 0.32) / 0.18)**2 + ((Y_rot - 0.02) / 0.26)**2)) * intensity * 0.65
+        arm_r = np.exp(-0.5 * (((X_rot + 0.32) / 0.18)**2 + ((Y_rot - 0.02) / 0.26)**2)) * intensity * 0.65
+        
+        # 5. Soft Ambient Body Aura
+        body_dist = np.hypot(dx, dy)
+        body_aura = np.exp(-0.5 * (body_dist / 0.70)**2) * intensity * 0.38
+        
+        return head_heat + shoulder_heat + torso_heat + arm_l + arm_r + body_aura

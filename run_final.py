@@ -116,6 +116,7 @@ def flash_receiver(port: str):
         bin_dir = os.path.join(ROOT_DIR, "firmware_receiver", "bin")
         bootloader = os.path.join(bin_dir, "bootloader.bin")
         partition = os.path.join(bin_dir, "partition-table.bin")
+        boot_app = os.path.join(bin_dir, "boot_app0.bin")
         receiver = os.path.join(bin_dir, "csi_receiver.bin")
 
         if not (os.path.exists(bootloader) and os.path.exists(partition) and os.path.exists(receiver)):
@@ -130,8 +131,10 @@ def flash_receiver(port: str):
             "write-flash",
             "0x1000", bootloader,
             "0x8000", partition,
-            "0x10000", receiver
         ]
+        if os.path.exists(boot_app):
+            cmd.extend(["0xe000", boot_app])
+        cmd.extend(["0x10000", receiver])
 
     print(f"[CMD] {' '.join(cmd)}\n")
     print("⏳ جاري الحرق... (إذا علق في Connecting... اضغط باستمرار على زر BOOT في البوردة لمدة ثانيتين)\n")

@@ -10,8 +10,12 @@ a live Wi-Fi CSI link spanning 3 nodes:
 from __future__ import annotations
 
 import os
+import sys
 import time
 from dataclasses import dataclass
+
+# Ensure dashboard folder is in sys.path so sibling imports work everywhere
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import joblib
 import matplotlib
@@ -191,8 +195,8 @@ initialize_session()
 artifacts = load_model_artifacts()
 
 # App Header
-st.title("📡 Wi-Fi CSI 3-Node Biometric Thermal Radar Tracker")
-st.caption("Multi-Static Human Sensing with ESP32 #1 (TX) + CSI_NODE_EXT (Extender) + ESP32 #2 (RX)")
+st.title("📡 Wi-Fi CSI 3-Node Real-Time People Tracker & Radar")
+st.caption("Zero-Delay Multi-Static Human Tracking: ESP32 #1 (TX) + CSI_NODE_EXT (AP) + ESP32 #2 (RX)")
 
 with st.sidebar:
     st.header("⚡ Hardware Link Setup")
@@ -215,7 +219,7 @@ with st.sidebar:
         - 📶 **Node 2: EXT (`CSI_NODE_EXT`)**
           * Range Extender AP
         - 📥 **Node 3: RX (ESP32 #2)**
-          * Dual-AP 20Hz Unicast Ping Client
+          * 20Hz Unicast Ping Client on Laptop
         """
     )
     st.divider()
@@ -228,32 +232,43 @@ with st.sidebar:
     else:
         st.error(artifacts["error"])
 
-with st.container(horizontal=True):
+# Control buttons (Using columns to fix Bug #1)
+col_b1, col_b2 = st.columns(2)
+with col_b1:
     if st.session_state.live_running:
-        st.button("⏸ Pause Live Tracking", type="secondary", on_click=stop_tracking)
+        st.button("⏸ إيقاف مؤقت (Pause)", type="secondary", on_click=stop_tracking)
     else:
-        st.button("▶ Resume Live Tracking", type="primary", on_click=start_tracking, disabled=not artifacts["ok"])
-    st.button("🔄 Reset Canvas / Recalibrate", on_click=start_tracking)
+        st.button("▶ استئناف التتبع (Resume)", type="primary", on_click=start_tracking, disabled=not artifacts["ok"])
+with col_b2:
+    st.button("🔄 إعادة ضبط الحسابات (Reset)", on_click=start_tracking)
 
 
-@st.fragment(run_every=0.20 if st.session_state.live_running else None)
+@st.fragment(run_every=0.10 if st.session_state.live_running else None)
 def live_panel() -> None:
-    """Poll frames and render responsive live radar frame."""
+    """Poll frames and render responsive live radar frame with zero delay."""
     state: LiveCSIState = st.session_state.live_state
     tracker: SmoothThermalTracker = st.session_state.tracker
     connection_error = None
     
     if st.session_state.live_running:
         try:
+            port_to_use = st.session_state.get("receiver_port", selected_port).strip()
+            baud_to_use = int(st.session_state.get("receiver_baud", baud_rate))
             manager = get_shared_serial_manager()
-            manager.ensure(selected_port.strip(), int(baud_rate))
+            manager.ensure(port_to_use, baud_to_use)
             for frame in manager.read_available():
                 state.ingest(frame, artifacts, artifacts["localizer"])
         except Exception as exc:
             connection_error = str(exc)
 
     label = state.label if state.packet_count else 0
-    figure = tracker.render_thermal_frame(label, float(state.latest_rssi or -55), state.estimated_position)
+    figure = tracker.render_thermal_frame(
+        label=label,
+        live_rssi=float(state.latest_rssi or -55),
+        estimated_position=state.estimated_position,
+        people_count=state.people_count,
+        secondary_position=state.secondary_position
+    )
     
     radar_col, telemetry_col = st.columns((2.4, 1.0))
     
@@ -262,17 +277,19 @@ def live_panel() -> None:
         st.pyplot(figure)
         plt.close(figure)
         
-        if state.estimated_position is not None:
+        # Display clear target tracking summary below radar
+        if state.people_count > 0 and state.estimated_position is not None:
             x, y = state.estimated_position
-            st.info(
-                f"🎯 **Biometric Target Detected:** Position: `({x:.2f}m, {y:.2f}m)` | "
-                f"Zone Confidence: `{state.zone_confidence:.0f}%` | Motion Energy: `{state.motion_energy:.2f}`"
-            )
+            msg = f"🎯 **شخص #1 متتبع الآن:** إحداثيات `X = {x:.2f}m, Y = {y:.2f}m` | سرعة الحركة: `{tracker.speed:.2f} m/s`"
+            if state.people_count >= 2 and state.secondary_position is not None:
+                x2, y2 = state.secondary_position
+                msg += f"\n\n🎯 **شخص #2 متتبع الآن:** إحداثيات `X = {x2:.2f}m, Y = {y2:.2f}m`"
+            st.info(msg)
         else:
-            st.caption("Room is currently empty / ambient RF baseline.")
+            st.caption("المكان فارغ حالياً — بانتظار مرور أي شخص لرسم النقطة وتتبعها فوراً.")
 
     with telemetry_col:
-        st.subheader("📊 Live Telemetry HUD")
+        st.subheader("📊 لوحة المؤشرات الحية (HUD)")
         if connection_error:
             st.error(f"Receiver Error: {connection_error}")
         elif not st.session_state.live_running:
@@ -282,18 +299,21 @@ def live_panel() -> None:
         else:
             st.success("🟢 3-Node Link Synchronized (20 Hz)")
 
-        st.metric("Detected Biometric State", STATES.get(label, "Unknown"), border=True)
-        st.metric("AI Model Confidence", f"{state.confidence:.1f}%", border=True)
-        st.metric("Signal RSSI", "--" if state.latest_rssi is None else f"{state.latest_rssi} dBm", border=True)
-        st.metric("Streaming Speed", f"{tracker.speed:.2f} m/s", border=True)
-        st.metric("Packets Processed", state.packet_count, border=True)
+        # 1. Prominent People Counter Metric
+        count_display = f"{state.people_count} أشخاص" if state.people_count > 1 else (f"{state.people_count} شخص" if state.people_count == 1 else "0 (المكان فارغ)")
+        st.metric("👥 عدد الأشخاص المتواجدين (People Count)", count_display, border=True)
+        
+        st.metric("حالة النشاط الحيوي", STATES.get(label, "Unknown"), border=True)
+        st.metric("سرعة الحركة اللحظية", f"{tracker.speed:.2f} m/s", border=True)
+        st.metric("قوة الإشارة (RSSI)", "--" if state.latest_rssi is None else f"{state.latest_rssi} dBm", border=True)
+        st.metric("إجمالي الفريمات المعالجة", state.packet_count, border=True)
         
         if state.packet_count:
             st.caption("64-Subcarrier CSI Amplitude Spectrum")
-            st.bar_chart(pd.DataFrame({"amplitude": state.latest_amplitudes}), y="amplitude", height=140)
+            st.bar_chart(pd.DataFrame({"amplitude": state.latest_amplitudes}), y="amplitude", height=130)
             
         if state.zone_probabilities:
-            st.caption("3-Zone Spatial Probability Distribution")
+            st.caption("توزيع احتمالية المناطق الثلاث")
             st.bar_chart(
                 pd.DataFrame({
                     "Zone": ["Center", "Right (EXT)", "Left (TX)"],
@@ -305,7 +325,7 @@ def live_panel() -> None:
                 }),
                 x="Zone",
                 y="Probability",
-                height=140,
+                height=130,
             )
 
 
@@ -317,6 +337,6 @@ with st.expander("ℹ️ How the 3-Node Multi-Static Wi-Fi CSI System Works"):
         - **Node 1 (ESP32 #1 - TX):** Transmits high-frequency 802.11n beacons on Channel 6.
         - **Node 2 (CSI_NODE_EXT AP):** Extends RF coverage and creates a secondary multipath reflection boundary.
         - **Node 3 (ESP32 #2 - RX):** Captures 64-subcarrier raw Channel State Information at 20 packets/sec via active ICMP ping echoes.
-        - **Biometric Heatmap Engine:** Fuses subcarrier variance across low, mid, and high bands with calibrated spatial centroids to continuously track the human's walking path and render an infrared FLIR thermal radiation silhouette.
+        - **Biometric Heatmap Engine:** Fuses subcarrier variance across low, mid, and high bands with calibrated spatial centroids to continuously track the human's walking path and render an infrared FLIR thermal radiation silhouette with distinct zero-delay tracking dots.
         """
     )

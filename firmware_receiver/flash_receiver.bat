@@ -11,12 +11,22 @@ echo Make sure ESP32 #2 is connected via USB.
 echo.
 set /p PORT=Enter COM Port (e.g. COM8, COM5, COM6) or press Enter to AUTO-DETECT: 
 
-if "%PORT%"=="" (
-    echo [INFO] Auto-detecting COM port and flashing...
-    python -m esptool --chip esp32 --baud 460800 write_flash -z 0x1000 "bin\bootloader.bin" 0x8000 "bin\partition-table.bin" 0x10000 "bin\csi_receiver.bin"
+if exist "bin\Receiver_ESP32.ino.merged.bin" (
+    if "%PORT%"=="" (
+        echo [INFO] Auto-detecting COM port and flashing merged binary...
+        python -m esptool --chip esp32 --baud 460800 write-flash 0x0 "bin\Receiver_ESP32.ino.merged.bin"
+    ) else (
+        echo [INFO] Flashing on %PORT%...
+        python -m esptool --chip esp32 --port %PORT% --baud 460800 write-flash 0x0 "bin\Receiver_ESP32.ino.merged.bin"
+    )
 ) else (
-    echo [INFO] Flashing on %PORT%...
-    python -m esptool --chip esp32 --port %PORT% --baud 460800 write_flash -z 0x1000 "bin\bootloader.bin" 0x8000 "bin\partition-table.bin" 0x10000 "bin\csi_receiver.bin"
+    if "%PORT%"=="" (
+        echo [INFO] Auto-detecting COM port and flashing...
+        python -m esptool --chip esp32 --baud 460800 write-flash 0x1000 "bin\bootloader.bin" 0x8000 "bin\partition-table.bin" 0x10000 "bin\csi_receiver.bin"
+    ) else (
+        echo [INFO] Flashing on %PORT%...
+        python -m esptool --chip esp32 --port %PORT% --baud 460800 write-flash 0x1000 "bin\bootloader.bin" 0x8000 "bin\partition-table.bin" 0x10000 "bin\csi_receiver.bin"
+    )
 )
 
 echo.

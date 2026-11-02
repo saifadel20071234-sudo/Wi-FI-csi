@@ -40,8 +40,9 @@
     "rssi_range"
   ],
   "test_accuracy": 1.0,
-  "cv_mean_accuracy": 1.0,
-  "cv_std_accuracy": 0.0,
+  "cv_mean_accuracy": null,
+  "cv_std_accuracy": null,
+  "evaluation_note": "Within-capture split only; collect at least 2 sessions per class for a valid field test.",
   "label_mapping": {
     "0": "Empty Room",
     "1": "Person Center",

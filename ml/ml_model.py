@@ -106,7 +106,7 @@ def train_and_evaluate():
     if capture_ids is not None and df.groupby("label")["capture_id"].nunique().min() >= 3:
         train_groups = capture_ids[~test_mask]
         folds = min(5, int(df.groupby("label")["capture_id"].nunique().min() - 1))
-        cv = StratifiedGroupKFold(n_splits=folds, shuffle=True, random_state=42)
+        cv = StratifiedGroupKFold(n_splits=folds)
         cv_scores = cross_val_score(model, X_train_scaled, y_train, groups=train_groups, cv=cv, scoring="accuracy")
         print(f"[+] Grouped CV Accuracy: {cv_scores.mean()*100:.2f}% (+/- {cv_scores.std()*100:.2f}%)")
     else:
