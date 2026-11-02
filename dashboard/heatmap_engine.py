@@ -213,13 +213,13 @@ class SmoothThermalTracker:
         # Transmitter Node (ESP32 #1 - TX)
         ax.scatter([self.tx_pos[0]], [self.tx_pos[1]], color="#00E5FF", s=220, marker="^",
                    edgecolors="#FFFFFF", linewidth=1.6, zorder=6)
-        ax.text(self.tx_pos[0], self.tx_pos[1] - 0.28, "📡 TX (ESP32 #1)", color="#00E5FF",
+        ax.text(self.tx_pos[0], self.tx_pos[1] - 0.28, "TX (ESP32 #1)", color="#00E5FF",
                 fontsize=9, fontweight="bold", ha="center", va="top", zorder=6)
         
         # Receiver Node (ESP32 #2 - RX)
         ax.scatter([self.rx_pos[0]], [self.rx_pos[1]], color="#39FF14", s=220, marker="s",
                    edgecolors="#FFFFFF", linewidth=1.6, zorder=6)
-        ax.text(self.rx_pos[0], self.rx_pos[1] + 0.28, "📥 RX (ESP32 #2)", color="#39FF14",
+        ax.text(self.rx_pos[0], self.rx_pos[1] + 0.28, "RX (ESP32 #2)", color="#39FF14",
                 fontsize=9, fontweight="bold", ha="center", va="bottom", zorder=6)
         
         # E) Human Target Reticle & Live Coordinate HUD

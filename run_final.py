@@ -98,28 +98,42 @@ def detect_or_wait_port():
 def flash_receiver(port: str):
     """Flashes precompiled ESP32 CSI Receiver firmware."""
     print("\n" + "="*80)
-    print(f"⚡ [جاري حرق الفيرموير على بوردة الاستقبال (ESP32 #2) عبر {port}]...")
+    print(f"⚡ [جاري حرق الفيرموير المحدث على بوردة الاستقبال (ESP32 #2) عبر {port}]...")
     print("="*80)
     
-    bin_dir = os.path.join(ROOT_DIR, "firmware_receiver", "bin")
-    bootloader = os.path.join(bin_dir, "bootloader.bin")
-    partition = os.path.join(bin_dir, "partition-table.bin")
-    receiver = os.path.join(bin_dir, "csi_receiver.bin")
+    merged_bin = os.path.join(ROOT_DIR, "firmware_receiver", "bin", "Receiver_ESP32.ino.merged.bin")
+    if not os.path.exists(merged_bin):
+        merged_bin = os.path.join(ROOT_DIR, "Receiver_ESP32", "build", "esp32.esp32.esp32doit-devkit-v1", "Receiver_ESP32.ino.merged.bin")
+    
+    if os.path.exists(merged_bin):
+        cmd = [
+            sys.executable, "-m", "esptool",
+            "--chip", "esp32",
+            "--port", port,
+            "--baud", "460800",
+            "write-flash", "0x0", merged_bin
+        ]
+    else:
+        bin_dir = os.path.join(ROOT_DIR, "firmware_receiver", "bin")
+        bootloader = os.path.join(bin_dir, "bootloader.bin")
+        partition = os.path.join(bin_dir, "partition-table.bin")
+        boot_app = os.path.join(bin_dir, "boot_app0.bin")
+        receiver = os.path.join(bin_dir, "csi_receiver.bin")
 
-    if not (os.path.exists(bootloader) and os.path.exists(partition) and os.path.exists(receiver)):
-        print("❌ خطأ: ملفات الفيرموير الثنائية غير موجودة في firmware_receiver/bin/")
-        return False
+        if not (os.path.exists(bootloader) and os.path.exists(partition) and os.path.exists(receiver)):
+            print("❌ خطأ: ملفات الفيرموير الثنائية غير موجودة في firmware_receiver/bin/")
+            return False
 
-    cmd = [
-        sys.executable, "-m", "esptool",
-        "--chip", "esp32",
-        "--port", port,
-        "--baud", "460800",
-        "write_flash", "-z",
-        "0x1000", bootloader,
-        "0x8000", partition,
-        "0x10000", receiver
-    ]
+        cmd = [
+            sys.executable, "-m", "esptool",
+            "--chip", "esp32",
+            "--port", port,
+            "--baud", "460800",
+            "write-flash",
+            "0x1000", bootloader,
+            "0x8000", partition,
+            "0x10000", receiver
+        ]
 
     print(f"[CMD] {' '.join(cmd)}\n")
     print("⏳ جاري الحرق... (إذا علق في Connecting... اضغط باستمرار على زر BOOT في البوردة لمدة ثانيتين)\n")
@@ -174,7 +188,7 @@ def test_live_csi_stream(port: str):
                 if "CSI_START" in line and "CSI_END" in line:
                     packets += 1
                     parts = line.split(",")
-                    print(f"   [FRAME #{packets}] RSSI: {parts[1]} dBm | Subcarriers: {parts[3]} | Amplitudes: {parts[4:10]}...")
+                    print(f"   [FRAME #{packets}] RSSI: {parts[2]} dBm | Subcarriers: {parts[3]} | Amplitudes: {parts[4:10]}...")
             time.sleep(0.01)
         ser.close()
         if packets > 0:
