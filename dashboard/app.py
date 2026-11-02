@@ -88,6 +88,7 @@ class SerialManager:
     connection: object | None = None
     port: str | None = None
     baud_rate: int | None = None
+    _buffer: str = ""
 
     def ensure(self, port: str, baud_rate: int):
         if serial is None:
@@ -107,7 +108,7 @@ class SerialManager:
         last_exc = None
         for attempt in range(3):
             try:
-                connection = serial.Serial(port=None, baudrate=baud_rate, timeout=0.04)
+                connection = serial.Serial(port=None, baudrate=baud_rate, timeout=0.05)
                 connection.dtr = False
                 connection.rts = False
                 connection.port = port
@@ -115,6 +116,7 @@ class SerialManager:
                 time.sleep(0.12)
                 connection.reset_input_buffer()
                 self.connection, self.port, self.baud_rate = connection, port, baud_rate
+                self._buffer = ""
                 return connection
             except Exception as exc:
                 last_exc = exc
@@ -129,19 +131,29 @@ class SerialManager:
             except Exception:
                 pass
         self.connection = self.port = self.baud_rate = None
+        self._buffer = ""
 
     def read_available(self, maximum_frames: int = 40) -> list[tuple[int, int, list[float]]]:
         if self.connection is None or not getattr(self.connection, "is_open", False):
             return []
         frames = []
         try:
-            for _ in range(maximum_frames):
-                if not self.connection.in_waiting:
-                    break
-                raw = self.connection.readline().decode("utf-8", errors="ignore")
-                frame = parse_csi_serial_line(raw)
-                if frame is not None:
-                    frames.append(frame)
+            bytes_to_read = self.connection.in_waiting
+            if bytes_to_read > 0:
+                chunk = self.connection.read(bytes_to_read).decode("utf-8", errors="ignore")
+                self._buffer += chunk
+                while "\n" in self._buffer:
+                    line, self._buffer = self._buffer.split("\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    frame = parse_csi_serial_line(line)
+                    if frame is not None:
+                        frames.append(frame)
+                        if len(frames) >= maximum_frames:
+                            break
+                if len(self._buffer) > 4096:
+                    self._buffer = self._buffer[-1024:]
         except Exception:
             self.close()
         return frames

@@ -96,7 +96,7 @@ class SmoothThermalTracker:
 
     def update_target(self, label: int, estimated_position=None):
         """Update target coordinates and thermal intensity based on CSI inference."""
-        if label == 0:
+        if label == 0 and estimated_position is None:
             self.target_intensity = 0.0
             self.active_zone_name = "EMPTY ROOM"
             return

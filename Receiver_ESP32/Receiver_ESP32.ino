@@ -1,5 +1,4 @@
 #include <WiFi.h>
-#include <WiFiMulti.h>
 #include "esp_wifi.h"
 #include "ping/ping_sock.h"
 #include <math.h>
@@ -7,10 +6,17 @@
 #define TARGET_SUBCARRIERS 64
 #define LED_PIN 2
 
-static WiFiMulti wifiMulti;
+const char* ssid_tx  = "CSI_TX_NODE";
+const char* pass_tx  = "12345678";
+const char* ssid_ext = "CSI_NODE_EXT";
+const char* pass_ext = "12345678";
+const int   channel  = 6;
+
 static char csi_line[700];
 static esp_ping_handle_t ping_handle = NULL;
 static bool csi_initialized = false;
+static unsigned long last_connect_attempt = 0;
+static int current_network_idx = 0;
 
 void _csi_rx_callback(void *ctx, wifi_csi_info_t *data) {
     if (data == NULL || data->buf == NULL || data->len < 2) return;
@@ -87,40 +93,55 @@ void setup() {
 
     Serial.setTxBufferSize(2048);
     Serial.begin(115200);
-    delay(400);
+    delay(300);
 
     Serial.println("\n========================================================");
-    Serial.println("  Wi-Fi CSI Multi-Node Receiver (Active Dual AP Engine)");
+    Serial.println("  Wi-Fi CSI Fast Multi-Node Receiver (Zero-Delay)");
     Serial.println("  Nodes: TX (CSI_TX_NODE) + EXT (CSI_NODE_EXT) + RX (COM)");
     Serial.println("========================================================");
 
-    WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);
-
-    // Register primary Transmitter AP and Extender AP
-    wifiMulti.addAP("CSI_TX_NODE", "12345678");
-    wifiMulti.addAP("CSI_NODE_EXT", "12345678");
-    wifiMulti.addAP("CSI_NODE_EXT", ""); // In case open network
-}
-
-void loop() {
-    if (wifiMulti.run() == WL_CONNECTED) {
-        digitalWrite(LED_PIN, HIGH);
-        if (!csi_initialized) {
+    WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+        if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+            digitalWrite(LED_PIN, HIGH);
             setupCSI();
             startContinuousPing(WiFi.gatewayIP());
-            Serial.print("[WiFi] Connected to: ");
+            Serial.print("\n[WiFi] Connected to: ");
             Serial.print(WiFi.SSID());
             Serial.print(" | IP: ");
             Serial.print(WiFi.localIP());
             Serial.print(" | Gateway: ");
             Serial.println(WiFi.gatewayIP());
             Serial.println("CSI Engine Active & 20Hz Unicast Ping Streaming!");
+        } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+            digitalWrite(LED_PIN, LOW);
+            csi_initialized = false;
         }
+    });
+
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.setSleep(false);
+
+    Serial.println("[WiFi] Fast-connecting directly on Channel 6...");
+    WiFi.begin(ssid_tx, pass_tx, channel);
+    last_connect_attempt = millis();
+}
+
+void loop() {
+    if (WiFi.status() == WL_CONNECTED) {
+        digitalWrite(LED_PIN, HIGH);
     } else {
         digitalWrite(LED_PIN, LOW);
-        csi_initialized = false;
-        delay(200);
+        if (millis() - last_connect_attempt > 3500) {
+            current_network_idx = (current_network_idx + 1) % 2;
+            const char* next_ssid = (current_network_idx == 0) ? ssid_tx : ssid_ext;
+            const char* next_pass = (current_network_idx == 0) ? pass_tx : pass_ext;
+            Serial.print("[WiFi] Retrying with: ");
+            Serial.println(next_ssid);
+            WiFi.disconnect();
+            WiFi.begin(next_ssid, next_pass, channel);
+            last_connect_attempt = millis();
+        }
     }
     delay(50);
 }

@@ -87,11 +87,12 @@ def extract_features(window: np.ndarray, rssi: np.ndarray) -> dict[str, float]:
     )
 
     try:
-        correlation = np.nan_to_num(np.corrcoef(window.T), nan=0.0)
+        jittered = window + 1e-6 * np.random.RandomState(42).randn(*window.shape)
+        correlation = np.nan_to_num(np.corrcoef(jittered.T), nan=0.0)
         upper = np.triu_indices(NUM_SUBCARRIERS, k=1)
         corr_mean = float(np.mean(correlation[upper]))
         corr_std = float(np.std(correlation[upper]))
-    except ValueError:
+    except Exception:
         corr_mean, corr_std = 0.0, 0.0
 
     try:
