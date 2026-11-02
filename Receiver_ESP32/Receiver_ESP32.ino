@@ -4,57 +4,61 @@
 
 const char* ssid     = "CSI_TX_NODE";
 const char* password = "12345678";
-
 #define NUM_SUBCARRIERS 64
 
-// CSI Callback executed on core 0 by the Wi-Fi task
+static char csi_line[600];
+
 void _csi_rx_callback(void *ctx, wifi_csi_info_t *data) {
-    if (data == NULL || data->buf == NULL || data->len < 2) {
-        return;
-    }
+    if (data == NULL || data->buf == NULL || data->len < 2) return;
+    int len = data->len;
+    int num_sub = len / 2;
+    if (num_sub != NUM_SUBCARRIERS) return;
 
-    const int8_t *buf = data->buf;
-    const int len = data->len;
-    const int rssi = data->rx_ctrl.rssi;
-    const uint32_t timestamp_ms = millis();
-    const int num_sub = len / 2;
+    int8_t *buf = data->buf;
+    int rssi = data->rx_ctrl.rssi;
+    uint32_t ts = millis();
 
-    // We output CSI frames only when they match 64 subcarriers
-    if (num_sub != NUM_SUBCARRIERS) {
-        return;
-    }
-
-    Serial.printf("CSI_START,%lu,%d,%d", (unsigned long)timestamp_ms, rssi, num_sub);
-
+    int n = snprintf(csi_line, sizeof(csi_line), "CSI_START,%lu,%d,64", (unsigned long)ts, rssi);
     for (int i = 0; i + 1 < len; i += 2) {
         float imag = (float)buf[i];
         float real = (float)buf[i + 1];
         float amp = sqrtf(real * real + imag * imag);
-        Serial.printf(",%.2f", amp);
+        n += snprintf(csi_line + n, sizeof(csi_line) - n, ",%.1f", amp);
     }
-
-    Serial.println(",CSI_END");
+    snprintf(csi_line + n, sizeof(csi_line) - n, ",CSI_END\n");
+    Serial.print(csi_line);
 }
 
 void setup() {
+    Serial.setTxBufferSize(2048);
     Serial.begin(115200);
-    delay(1000);
+    delay(500);
 
     Serial.println("\n==========================================");
     Serial.println("  📥 Wi-Fi CSI Receiver Starting...");
     Serial.println("==========================================");
 
-    // 1. Initialize Wi-Fi in Station Mode
     WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    delay(100);
-
-    // 2. Connect to Transmitter AP
-    Serial.print("Connecting to Transmitter SSID: ");
-    Serial.println(ssid);
+    WiFi.setSleep(false);
     WiFi.begin(ssid, password);
 
-    // 3. Configure CSI (MUST be done after Wi-Fi is initialized/started)
+    Serial.print("Connecting to: ");
+    Serial.println(ssid);
+
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 40) {
+        delay(300);
+        Serial.print(".");
+        attempts++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\n✅ Connected to Transmitter! IP: " + WiFi.localIP().toString());
+    } else {
+        Serial.println("\n[!] Connection timeout, activating CSI anyway...");
+    }
+
+    // Enable CSI
     wifi_csi_config_t csi_config = {
         .lltf_en = true,
         .htltf_en = true,
@@ -64,37 +68,13 @@ void setup() {
         .manu_scale = false,
     };
 
-    esp_err_t err;
-    err = esp_wifi_set_csi_config(&csi_config);
-    if (err != ESP_OK) {
-        Serial.printf("[-] esp_wifi_set_csi_config failed: 0x%x\n", err);
-    }
+    esp_wifi_set_csi_config(&csi_config);
+    esp_wifi_set_csi_rx_cb(&_csi_rx_callback, NULL);
+    esp_wifi_set_csi(true);
 
-    err = esp_wifi_set_csi_rx_cb(&_csi_rx_callback, NULL);
-    if (err != ESP_OK) {
-        Serial.printf("[-] esp_wifi_set_csi_rx_cb failed: 0x%x\n", err);
-    }
-
-    err = esp_wifi_set_csi(true);
-    if (err != ESP_OK) {
-        Serial.printf("[-] esp_wifi_set_csi failed: 0x%x\n", err);
-    } else {
-        Serial.println("✅ CSI Engine Activated Successfully!");
-    }
-
-    Serial.println("Waiting for Wi-Fi connection and CSI packets...");
+    Serial.println("✅ CSI Engine Initialized & Streaming!");
 }
 
 void loop() {
-    static unsigned long last_check = 0;
-    if (millis() - last_check > 3000) {
-        last_check = millis();
-        if (WiFi.status() == WL_CONNECTED) {
-            // Quietly connected
-        } else {
-            Serial.println("[*] Reconnecting to CSI_TX_NODE...");
-            WiFi.reconnect();
-        }
-    }
-    delay(10);
+    delay(100);
 }

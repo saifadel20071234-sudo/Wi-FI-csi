@@ -205,10 +205,18 @@ def parse_csi_serial_line(line: str):
         return None
     try:
         parts = line.replace(",CSI_END", "").split(",")
-        num_sub = int(parts[3])
-        if num_sub != NUM_SUB:
+        raw_amps = [float(x) for x in parts[4:] if x.strip()]
+        if len(raw_amps) < 10:
             return None
-        amplitudes = [float(x) for x in parts[4:4 + num_sub]]
+        if len(raw_amps) == NUM_SUB:
+            amplitudes = raw_amps
+        elif len(raw_amps) > NUM_SUB:
+            amplitudes = raw_amps[:NUM_SUB]
+        else:
+            # Interpolate to 64 subcarriers if needed
+            x_old = np.linspace(0, 1, len(raw_amps))
+            x_new = np.linspace(0, 1, NUM_SUB)
+            amplitudes = list(np.interp(x_new, x_old, raw_amps))
         return int(parts[1]), int(parts[2]), amplitudes
     except Exception:
         return None
@@ -245,8 +253,6 @@ with st.sidebar:
             default_idx = len(available_ports) - 1
             
         selected_port = st.selectbox("Select Receiver COM Port", available_ports, index=default_idx)
-        if selected_port == "COM8":
-            st.warning("⚠️ Note: COM8 is usually the Transmitter! Make sure you select the Receiver (COM9).")
 
     baud_rate = st.selectbox("Baud Rate", [115200, 460800, 921600], index=0)
     

@@ -72,13 +72,7 @@ def detect_or_wait_port():
             
             if len(ports) == 1:
                 selected = ports[0].device
-                print(f"\n[+] تم العثور على منفذ واحد فقط: {selected}")
-                if selected == "COM8":
-                    print("\n⚠️ [تنبيه هام جداً]: هذا المنفذ (COM8) هو جهاز الإرسال!")
-                    print("   بوردة الاستقبال (ESP32 Receiver) غير موصلة باللابتوب حالياً!")
-                    print("   يرجى التأكد من توصيل كابل USB بوردة الاستقبال الثانية باللابتوب.")
-                    input("\nبعد توصيل بوردة الاستقبال، اضغط Enter لإعادة الفحص التلقائي...")
-                    continue
+                print(f"\n[+] تم العثور على بوردة الاستقبال (ESP32 Receiver) على المنفذ: {selected}")
                 return selected
             else:
                 # Intelligently suggest COM9 or the last connected device for Receiver
