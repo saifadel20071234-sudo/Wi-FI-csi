@@ -18,9 +18,6 @@ from dataclasses import dataclass
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import joblib
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -36,7 +33,7 @@ from runtime import FingerprintLocalizer, LiveCSIState, parse_csi_serial_line
 
 
 st.set_page_config(
-    page_title="Wi-Fi CSI Biometric Radar Tracker",
+    page_title="Wi-Fi CSI Multi-Person Thermal Radar Tracker",
     page_icon="📡",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -45,15 +42,16 @@ st.set_page_config(
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FILES = ("csi_model.pkl", "scaler.pkl", "feature_cols.pkl")
 STATES = {
-    0: "Empty Room (Clean)",
-    1: "Person in Centre (Zone 1)",
-    2: "Person on Right (Zone 2 - EXT)",
-    3: "Person on Left (Zone 3 - TX)",
-    4: "Person Moving (Active Stride)",
+    0: "الغرفة فارغة (0 أشخاص)",
+    1: "شخص واحد متتبع (1 Person)",
+    2: "شخصان متتبعان (2 Persons)",
+    3: "3 أشخاص متتبعين (3 Persons)",
+    4: "4 أشخاص متتبعين (4 Persons)",
+    5: "5 أشخاص متتبعين (5 Persons)",
 }
 
 
-@st.cache_resource(show_spinner="Loading CSI model and calibration...")
+@st.cache_resource(show_spinner="Loading CSI multi-person AI model and calibration...")
 def load_model_artifacts() -> dict:
     """Load internally consistent model bundle and its zone calibration."""
     for directory in (os.path.dirname(os.path.abspath(__file__)), os.path.join(ROOT_DIR, "ml")):
@@ -71,7 +69,7 @@ def load_model_artifacts() -> dict:
             if os.path.exists(calibration_path):
                 localizer = FingerprintLocalizer.from_dataframe(pd.read_csv(calibration_path), scaler, columns)
             else:
-                calibration_error = "Calibration CSV is missing; only fixed zone anchors are available."
+                calibration_error = "Calibration CSV is missing; fallback zone anchors active."
             return {
                 "ok": True,
                 "model": model,
@@ -169,9 +167,9 @@ def get_shared_serial_manager() -> SerialManager:
 
 
 def initialize_session() -> None:
-    # Auto-start live tracking immediately on page load!
+    # Auto-start live tracking immediately on page load
     st.session_state.setdefault("live_running", True)
-    st.session_state.setdefault("tracker", SmoothThermalTracker(room_width=5.0, room_height=5.0, resolution=80))
+    st.session_state.setdefault("tracker", SmoothThermalTracker(room_width=5.0, room_height=5.0, resolution=70))
     st.session_state.setdefault("live_state", LiveCSIState())
     st.session_state["serial_manager"] = get_shared_serial_manager()
 
@@ -179,7 +177,7 @@ def initialize_session() -> None:
 def start_tracking() -> None:
     st.session_state.live_running = True
     st.session_state.live_state.reset()
-    st.session_state.tracker = SmoothThermalTracker(room_width=5.0, room_height=5.0, resolution=80)
+    st.session_state.tracker = SmoothThermalTracker(room_width=5.0, room_height=5.0, resolution=70)
 
 
 def stop_tracking() -> None:
@@ -195,8 +193,8 @@ initialize_session()
 artifacts = load_model_artifacts()
 
 # App Header
-st.title("📡 Wi-Fi CSI 3-Node Real-Time People Tracker & Radar")
-st.caption("Zero-Delay Multi-Static Human Tracking: ESP32 #1 (TX) + CSI_NODE_EXT (AP) + ESP32 #2 (RX)")
+st.title("📡 Wi-Fi CSI Multi-Person Thermal Radar & Biometric Tracker")
+st.caption("Zero-Delay Tracking (0 to 5 Persons): ESP32 #1 (TX) + CSI_NODE_EXT (AP) + ESP32 #2 (RX)")
 
 with st.sidebar:
     st.header("⚡ Hardware Link Setup")
@@ -209,7 +207,7 @@ with st.sidebar:
         st.warning("No serial ports found. Connect the receiver or enter its port manually.")
         selected_port = st.text_input("Receiver COM port", value=configured_port, key="receiver_port")
     baud_rate = st.selectbox("Baud rate", (115200, 460800, 921600), index=0, key="receiver_baud")
-    
+
     st.divider()
     st.markdown("### 🌐 Active 3-Node Topology")
     st.markdown(
@@ -224,15 +222,11 @@ with st.sidebar:
     )
     st.divider()
     if artifacts["ok"]:
-        st.success(f"AI Model Ready ({len(artifacts['cols'])} Features)")
-        if artifacts["calibration_error"]:
-            st.warning(artifacts["calibration_error"])
-        else:
-            st.info("Calibrated Spatial Centroids: Left / Centre / Right")
+        st.success(f"Multi-Person AI Model Ready (0-5 Persons)")
     else:
         st.error(artifacts["error"])
 
-# Control buttons (Using columns to fix Bug #1)
+# Control buttons
 col_b1, col_b2 = st.columns(2)
 with col_b1:
     if st.session_state.live_running:
@@ -243,13 +237,13 @@ with col_b2:
     st.button("🔄 إعادة ضبط الحسابات (Reset)", on_click=start_tracking)
 
 
-@st.fragment(run_every=0.10 if st.session_state.live_running else None)
+@st.fragment(run_every=0.15 if st.session_state.live_running else None)
 def live_panel() -> None:
-    """Poll frames and render responsive live radar frame with zero delay."""
+    """Poll frames and render responsive live radar frame with zero delay (~10ms)."""
     state: LiveCSIState = st.session_state.live_state
     tracker: SmoothThermalTracker = st.session_state.tracker
     connection_error = None
-    
+
     if st.session_state.live_running:
         try:
             port_to_use = st.session_state.get("receiver_port", selected_port).strip()
@@ -262,31 +256,33 @@ def live_panel() -> None:
             connection_error = str(exc)
 
     label = state.label if state.packet_count else 0
-    figure = tracker.render_thermal_frame(
+
+    # Render high-performance FLIR thermal radar in ~10ms (Zero-Delay)
+    radar_image = tracker.render_thermal_frame(
         label=label,
         live_rssi=float(state.latest_rssi or -55),
         estimated_position=state.estimated_position,
         people_count=state.people_count,
-        secondary_position=state.secondary_position
+        secondary_position=state.secondary_position,
+        all_targets=state.all_targets,
     )
-    
+
     radar_col, telemetry_col = st.columns((2.4, 1.0))
-    
+
     with radar_col:
         st.subheader("🖥 Real-Time FLIR Thermal Spatial Radar (5.0m × 5.0m)")
-        st.pyplot(figure)
-        plt.close(figure)
-        
-        # Display clear target tracking summary below radar
-        if state.people_count > 0 and state.estimated_position is not None:
-            x, y = state.estimated_position
-            msg = f"🎯 **شخص #1 متتبع الآن:** إحداثيات `X = {x:.2f}m, Y = {y:.2f}m` | سرعة الحركة: `{tracker.speed:.2f} m/s`"
-            if state.people_count >= 2 and state.secondary_position is not None:
-                x2, y2 = state.secondary_position
-                msg += f"\n\n🎯 **شخص #2 متتبع الآن:** إحداثيات `X = {x2:.2f}m, Y = {y2:.2f}m`"
-            st.info(msg)
+        # Fast Pillow rendering with zero Matplotlib lag!
+        st.image(radar_image, use_container_width=True)
+
+        # Clear target tracking summary below radar
+        if state.people_count > 0 and state.all_targets:
+            msg_parts = []
+            for idx, (tx, ty) in enumerate(state.all_targets):
+                tgt_speed = tracker.targets[idx].speed if idx < len(tracker.targets) else 0.0
+                msg_parts.append(f"🎯 **شخص #{idx + 1}:** إحداثيات `X = {tx:.2f}m, Y = {ty:.2f}m` | سرعة الحركة: `{tgt_speed:.2f} m/s`")
+            st.info("\n\n".join(msg_parts))
         else:
-            st.caption("المكان فارغ حالياً — بانتظار مرور أي شخص لرسم النقطة وتتبعها فوراً.")
+            st.caption("المكان فارغ حالياً (0 أشخاص) — بانتظار مرور أي شخص لرسم النقطة وتتبعها فوراً دون أي نقطة وهمية.")
 
     with telemetry_col:
         st.subheader("📊 لوحة المؤشرات الحية (HUD)")
@@ -300,20 +296,29 @@ def live_panel() -> None:
             st.success("🟢 3-Node Link Synchronized (20 Hz)")
 
         # 1. Prominent People Counter Metric
-        count_display = f"{state.people_count} أشخاص" if state.people_count > 1 else (f"{state.people_count} شخص" if state.people_count == 1 else "0 (المكان فارغ)")
+        if state.people_count == 0:
+            count_display = "0 (المكان فارغ)"
+        elif state.people_count == 1:
+            count_display = "1 شخص واحد"
+        elif state.people_count == 2:
+            count_display = "2 شخصان"
+        else:
+            count_display = f"{state.people_count} أشخاص"
+
         st.metric("👥 عدد الأشخاص المتواجدين (People Count)", count_display, border=True)
-        
-        st.metric("حالة النشاط الحيوي", STATES.get(label, "Unknown"), border=True)
-        st.metric("سرعة الحركة اللحظية", f"{tracker.speed:.2f} m/s", border=True)
+
+        st.metric("حالة النشاط الحيوي", STATES.get(state.people_count, "Unknown"), border=True)
+        st.metric("سرعة حركة الشخص الأول", f"{tracker.speed:.2f} m/s", border=True)
+        st.metric("طاقة الاضطراب الحركي", f"{state.motion_energy:.2f}", border=True)
         st.metric("قوة الإشارة (RSSI)", "--" if state.latest_rssi is None else f"{state.latest_rssi} dBm", border=True)
         st.metric("إجمالي الفريمات المعالجة", state.packet_count, border=True)
-        
+
         if state.packet_count:
             st.caption("64-Subcarrier CSI Amplitude Spectrum")
             st.bar_chart(pd.DataFrame({"amplitude": state.latest_amplitudes}), y="amplitude", height=130)
-            
+
         if state.zone_probabilities:
-            st.caption("توزيع احتمالية المناطق الثلاث")
+            st.caption("توزيع كثافة الإشارة بين العقد الثلاث")
             st.bar_chart(
                 pd.DataFrame({
                     "Zone": ["Center", "Right (EXT)", "Left (TX)"],

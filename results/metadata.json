@@ -1,6 +1,6 @@
 {
   "model_type": "RandomForestClassifier",
-  "n_samples": 570,
+  "n_samples": 780,
   "n_features": 35,
   "feature_names": [
     "mean_amp",
@@ -39,15 +39,16 @@
     "rssi_std",
     "rssi_range"
   ],
-  "test_accuracy": 1.0,
-  "cv_mean_accuracy": null,
-  "cv_std_accuracy": null,
-  "evaluation_note": "Within-capture split only; collect at least 2 sessions per class for a valid field test.",
+  "test_accuracy": 0.8167,
+  "cv_mean_accuracy": 0.8097,
+  "cv_std_accuracy": 0.0168,
+  "evaluation_note": "Held-out capture session per class (generalized validation).",
   "label_mapping": {
-    "0": "Empty Room",
-    "1": "Person Center",
-    "2": "Person Right",
-    "3": "Person Left",
-    "4": "Person Moving"
+    "0": "0 Persons (Empty Room)",
+    "1": "1 Person Detected",
+    "2": "2 Persons Detected",
+    "3": "3 Persons Detected",
+    "4": "4 Persons Detected",
+    "5": "5 Persons Detected"
   }
 }

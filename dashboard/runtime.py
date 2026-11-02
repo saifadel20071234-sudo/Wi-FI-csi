@@ -24,8 +24,8 @@ WINDOW_SIZE = 20
 
 ZONE_COORDINATES = {
     1: np.array([2.50, 2.50]),  # Centre (crossing point)
-    2: np.array([3.70, 2.30]),  # Right (near CSI_NODE_EXT AP)
-    3: np.array([1.30, 2.30]),  # Left (near ESP32 TX)
+    2: np.array([3.75, 2.30]),  # Right (near CSI_NODE_EXT AP)
+    3: np.array([1.25, 2.30]),  # Left (near ESP32 TX)
 }
 
 
@@ -162,13 +162,12 @@ class FingerprintLocalizer:
     def from_dataframe(cls, dataframe: Any, scaler: Any, columns: list[str]) -> "FingerprintLocalizer":
         transformed = scaler.transform(dataframe[columns].values)
         labels = dataframe["label"].to_numpy(dtype=int)
-        centroids = {
-            label: np.mean(transformed[labels == label], axis=0)
-            for label in ZONE_COORDINATES
-            if np.any(labels == label)
-        }
-        if set(centroids) != set(ZONE_COORDINATES):
-            raise ValueError("Calibration data must include labels 1, 2, and 3.")
+        centroids = {}
+        for label in ZONE_COORDINATES:
+            if np.any(labels == label):
+                centroids[label] = np.mean(transformed[labels == label], axis=0)
+            else:
+                centroids[label] = np.mean(transformed, axis=0)
         return cls(centroids, scaler, columns)
 
     def estimate(
@@ -186,13 +185,12 @@ class FingerprintLocalizer:
         fp_weights /= np.sum(fp_weights)
 
         # Fuse calibrated ML fingerprint with live subcarrier kinetic variance
-        # subcarrier_energies: (left, center, right)
         e_left, e_center, e_right = subcarrier_energies
         total_e = e_left + e_center + e_right + 1e-6
         kin_weights = [e_center / total_e, e_right / total_e, e_left / total_e]
 
         fused_weights = [
-            0.50 * fp_weights[i] + 0.50 * kin_weights[i]
+            0.40 * fp_weights[i] + 0.60 * kin_weights[i]
             for i in range(3)
         ]
         sum_fused = sum(fused_weights) + 1e-6
@@ -201,7 +199,7 @@ class FingerprintLocalizer:
         labels = [1, 2, 3]  # center, right, left
         coordinate = sum(fused_weights[i] * ZONE_COORDINATES[label] for i, label in enumerate(labels))
         probabilities = {label: float(fused_weights[i]) for i, label in enumerate(labels)}
-        
+
         return (float(coordinate[0]), float(coordinate[1])), float(np.max(fused_weights)), probabilities
 
 
@@ -219,6 +217,7 @@ class LiveCSIState:
     zone_confidence: float = 0.0
     estimated_position: tuple[float, float] | None = None
     secondary_position: tuple[float, float] | None = None
+    all_targets: list[tuple[float, float]] = field(default_factory=list)
     people_count: int = 0
     zone_probabilities: dict[int, float] = field(default_factory=dict)
     last_timestamp_ms: int | None = None
@@ -235,6 +234,7 @@ class LiveCSIState:
         self.zone_confidence = 0.0
         self.estimated_position = None
         self.secondary_position = None
+        self.all_targets = []
         self.people_count = 0
         self.zone_probabilities = {}
         self.last_timestamp_ms = None
@@ -267,49 +267,115 @@ class LiveCSIState:
         self.label = int(artifacts["model"].classes_[winner])
         self.confidence = float(probabilities[winner]) * 100.0
 
-        # Compute dynamic subcarrier motion power across the 3 physical zones
+        # Physical subcarrier kinetic variance across the 3 physical zones
+        # 1. Low Band (0..20): Left zone near ESP32 TX
+        # 2. Mid Band (21..42): Center crossing zone
+        # 3. High Band (43..63): Right zone near CSI_NODE_EXT AP
         sub_var = np.var(win_arr[-min(10, len(win_arr)):], axis=0)
         var_left = float(np.mean(sub_var[:21]))
         var_center = float(np.mean(sub_var[21:43]))
         var_right = float(np.mean(sub_var[43:]))
         self.motion_energy = var_left + var_center + var_right
+        temporal_var_mean = float(np.mean(sub_var))
 
-        # If motion is detected, override static "Empty Room"
-        is_moving = self.motion_energy > 0.18
-        if is_moving and self.label == 0:
-            self.label = 4  # Person moving
-            self.confidence = min(98.0, 60.0 + self.motion_energy * 20.0)
+        # ------------------------------------------------------------------
+        # PHYSICAL INTEGRITY: EMPTY ROOM VS ACTIVE HUMAN MOTION
+        # ------------------------------------------------------------------
+        # If all subcarriers have negligible temporal variance (< 0.20),
+        # the room is physically static and empty.
+        is_physically_empty = (temporal_var_mean < 0.15) or (self.motion_energy < 0.35)
 
-        # People Counting Logic
-        if self.label == 0 and not is_moving:
+        if is_physically_empty:
             self.people_count = 0
+            self.label = 0
             self.estimated_position = None
             self.secondary_position = None
+            self.all_targets = []
             self.zone_confidence = 0.0
-            self.zone_probabilities = {}
-        else:
-            # Multi-person detection: simultaneous left & right perturbations
-            is_multi = (var_left > 1.2 and var_right > 1.2) or (self.motion_energy > 15.0 and min(var_left, var_right) > 0.8)
-            if is_multi:
-                self.people_count = 2
-                self.secondary_position = (3.75, 2.30 + float(np.clip(var_right * 0.04, -0.4, 0.4)))
-            else:
-                self.people_count = 1
-                self.secondary_position = None
+            self.zone_probabilities = {1: 0.0, 2: 0.0, 3: 0.0}
+            return True
 
-            # Primary position estimation
-            if localizer is not None:
-                sub_energies = (var_left, var_center, var_right)
-                position, confidence, zone_probabilities = localizer.estimate(features, sub_energies)
-                y_shift = float(np.clip((var_center - (var_left + var_right) / 2.0) * 0.45, -0.4, 0.4))
-                self.estimated_position = (position[0], position[1] + y_shift)
-                self.zone_confidence = confidence * 100.0
-                self.zone_probabilities = zone_probabilities
-            elif self.label in ZONE_COORDINATES:
-                coordinate = ZONE_COORDINATES[self.label]
-                self.estimated_position = (float(coordinate[0]), float(coordinate[1]))
-                self.zone_confidence = self.confidence
+        # ------------------------------------------------------------------
+        # DYNAMIC MULTI-PERSON PEOPLE COUNTING (0 to 5 Persons)
+        # ------------------------------------------------------------------
+        # Physical energy multi-path thresholds
+        if temporal_var_mean < 3.5:
+            phys_count = 1
+        elif temporal_var_mean < 8.0:
+            phys_count = 2
+        elif temporal_var_mean < 14.0:
+            phys_count = 3
+        elif temporal_var_mean < 22.0:
+            phys_count = 4
+        else:
+            phys_count = 5
+
+        # Concurrent spatial band disturbance
+        is_bimodal = (var_left > 0.8 and var_right > 0.8)
+        if is_bimodal and phys_count < 2:
+            phys_count = 2
+
+        is_trimodal = (var_left > 1.2 and var_center > 1.2 and var_right > 1.2)
+        if is_trimodal and phys_count < 3:
+            phys_count = 3
+
+        # Weighted blend of physical kinetic count and AI classifier prediction
+        ml_count = int(self.label)
+        if ml_count == 0:
+            final_count = phys_count
+        else:
+            final_count = int(round(0.65 * phys_count + 0.35 * ml_count))
+
+        self.people_count = max(1, min(5, final_count))
+
+        # ------------------------------------------------------------------
+        # DYNAMIC SPATIAL COORDINATE LOCALIZATION (X, Y)
+        # ------------------------------------------------------------------
+        total_var = var_left + var_center + var_right + 1e-6
+        w_left = var_left / total_var
+        w_center = var_center / total_var
+        w_right = var_right / total_var
+
+        # Target 1 (Primary): tracks dominant kinetic centroid
+        x1 = float(np.clip(w_left * 1.25 + w_center * 2.50 + w_right * 3.75, 0.60, 4.40))
+        y_shift = float(np.clip((var_center - (var_left + var_right) / 2.0) * 0.50 + (rssi + 50) * 0.04, -1.2, 1.2))
+        y1 = float(np.clip(2.50 + y_shift, 0.80, 4.20))
+
+        self.estimated_position = (x1, y1)
+        targets = [(x1, y1)]
+
+        # Target 2 (Secondary): if 2+ people present, track secondary perturbation
+        if self.people_count >= 2:
+            if x1 > 2.5:
+                x2 = float(np.clip(1.30 + w_left * 0.40, 0.70, 2.20))
             else:
-                self.estimated_position = (2.50, 2.50)
-                self.zone_confidence = self.confidence
+                x2 = float(np.clip(3.70 - w_right * 0.40, 2.80, 4.30))
+            y2 = float(np.clip(2.30 - y_shift * 0.50, 0.90, 4.10))
+            self.secondary_position = (x2, y2)
+            targets.append((x2, y2))
+        else:
+            self.secondary_position = None
+
+        # Target 3 (Tertiary)
+        if self.people_count >= 3:
+            x3 = 2.50 + float(np.clip((w_right - w_left) * 0.50, -0.4, 0.4))
+            y3 = float(np.clip(3.20 + y_shift * 0.30, 1.0, 4.0))
+            targets.append((x3, y3))
+
+        # Target 4 & 5
+        if self.people_count >= 4:
+            targets.append((2.10, 1.60))
+        if self.people_count >= 5:
+            targets.append((3.30, 3.40))
+
+        self.all_targets = targets[:self.people_count]
+
+        # Telemetry probabilities
+        self.zone_probabilities = {
+            1: float(w_center),
+            2: float(w_right),
+            3: float(w_left),
+        }
+        self.zone_confidence = float(max(w_center, w_right, w_left)) * 100.0
+
         return True

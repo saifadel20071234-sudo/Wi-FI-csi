@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include "esp_wifi.h"
 #include "ping/ping_sock.h"
 #include <math.h>
@@ -16,7 +17,9 @@ static char csi_line[700];
 static esp_ping_handle_t ping_handle = NULL;
 static bool csi_initialized = false;
 static unsigned long last_connect_attempt = 0;
+static unsigned long last_udp_probe = 0;
 static int current_network_idx = 0;
+static WiFiUDP udpProbe;
 
 void _csi_rx_callback(void *ctx, wifi_csi_info_t *data) {
     if (data == NULL || data->buf == NULL || data->len < 2) return;
@@ -111,7 +114,7 @@ void setup() {
             Serial.print(WiFi.localIP());
             Serial.print(" | Gateway: ");
             Serial.println(WiFi.gatewayIP());
-            Serial.println("CSI Engine Active & 20Hz Unicast Ping Streaming!");
+            Serial.println("CSI Engine Active & Multi-Node Broadcast Probing Started!");
         } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
             digitalWrite(LED_PIN, LOW);
             csi_initialized = false;
@@ -130,6 +133,14 @@ void setup() {
 void loop() {
     if (WiFi.status() == WL_CONNECTED) {
         digitalWrite(LED_PIN, HIGH);
+
+        // Active multi-node broadcast probing: stimulates TX and EXT AP simultaneously
+        if (millis() - last_udp_probe >= 40) {
+            last_udp_probe = millis();
+            udpProbe.beginPacket(IPAddress(255, 255, 255, 255), 12345);
+            udpProbe.write((const uint8_t*)"CSI_PROBE", 9);
+            udpProbe.endPacket();
+        }
     } else {
         digitalWrite(LED_PIN, LOW);
         if (millis() - last_connect_attempt > 3500) {
@@ -143,5 +154,5 @@ void loop() {
             last_connect_attempt = millis();
         }
     }
-    delay(50);
+    delay(10);
 }
