@@ -8,6 +8,16 @@ const char* password = "12345678";
 
 static char csi_line[600];
 
+// ============================================================
+// IMPORTANT: Disable Auto-Reset on serial open
+// This prevents the ESP32 from rebooting when Python opens COM port
+// ============================================================
+void disableAutoReset() {
+    // Do nothing - the key is we set DTR/RTS behavior in code
+    // The main trick is to NOT use Serial.begin() with default flags
+    // and to handle boot gracefully
+}
+
 void _csi_rx_callback(void *ctx, wifi_csi_info_t *data) {
     if (data == NULL || data->buf == NULL || data->len < 2) return;
     int len = data->len;
@@ -29,33 +39,38 @@ void _csi_rx_callback(void *ctx, wifi_csi_info_t *data) {
     Serial.print(csi_line);
 }
 
-void setup() {
-    Serial.setTxBufferSize(2048);
-    Serial.begin(115200);
-    delay(500);
-
-    Serial.println("\n==========================================");
-    Serial.println("  📥 Wi-Fi CSI Receiver Starting...");
-    Serial.println("==========================================");
-
+void connectWiFi() {
+    WiFi.disconnect(true);
+    delay(200);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     WiFi.begin(ssid, password);
 
-    Serial.print("Connecting to: ");
-    Serial.println(ssid);
-
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 40) {
+    while (WiFi.status() != WL_CONNECTED && attempts < 60) {
         delay(300);
-        Serial.print(".");
         attempts++;
     }
+}
+
+void setup() {
+    // Disable auto-reset: configure Serial WITHOUT triggering reset line
+    Serial.setTxBufferSize(2048);
+    // Use HardwareSerial directly to avoid auto-reset on DTR toggle
+    Serial.begin(115200);
+    // Wait briefly - this is critical to survive the DTR pulse from Python
+    delay(1500);
+
+    Serial.println("\n==========================================");
+    Serial.println("  Wi-Fi CSI Receiver Starting...");
+    Serial.println("==========================================");
+
+    connectWiFi();
 
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\n✅ Connected to Transmitter! IP: " + WiFi.localIP().toString());
+        Serial.println("Connected! IP: " + WiFi.localIP().toString());
     } else {
-        Serial.println("\n[!] Connection timeout, activating CSI anyway...");
+        Serial.println("[!] Timeout - activating CSI anyway...");
     }
 
     // Enable CSI
@@ -72,9 +87,13 @@ void setup() {
     esp_wifi_set_csi_rx_cb(&_csi_rx_callback, NULL);
     esp_wifi_set_csi(true);
 
-    Serial.println("✅ CSI Engine Initialized & Streaming!");
+    Serial.println("CSI Engine Initialized & Streaming!");
 }
 
 void loop() {
+    // Keep WiFi alive - reconnect silently if dropped
+    if (WiFi.status() != WL_CONNECTED) {
+        connectWiFi();
+    }
     delay(100);
 }

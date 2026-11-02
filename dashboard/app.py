@@ -314,7 +314,7 @@ def get_serial_holder():
                     return self.ser
                 except Exception as e:
                     last_err = e
-                    time.sleep(0.3)
+                    time.sleep(0.2)
             raise last_err
 
         def close(self):
@@ -403,15 +403,28 @@ if st.session_state.live_running:
                     current_label = int(artifacts["model"].classes_[idx])
                     current_conf = float(probs[idx]) * 100
 
-                now = time.time()
-                # 1. Update Spatial Thermal Radar & Telemetry HUD (Rate-limited for max smoothness)
-                if now - last_ui_render >= UI_INTERVAL:
-                    last_ui_render = now
-                    
-                    fig = tracker.render_thermal_frame(current_label, latest_rssi)
-                    radar_placeholder.pyplot(fig)
-                    plt.close(fig)
+            now = time.time()
+            # 1. Update Spatial Thermal Radar & Telemetry HUD
+            if now - last_ui_render >= UI_INTERVAL:
+                last_ui_render = now
+                
+                fig = tracker.render_thermal_frame(current_label, latest_rssi)
+                radar_placeholder.pyplot(fig)
+                plt.close(fig)
 
+                if packet_counter == 0:
+                    status_card.markdown("""
+                    <div class="hud-card">
+                        <div class="hud-title">Hardware Link Status</div>
+                        <span class="status-badge" style="background:rgba(234, 179, 8, 0.2); color:#EAB308; border:1px solid #EAB308;">
+                            ⏳ SEARCHING FOR CSI_TX_NODE...
+                        </span>
+                        <div style="font-size:0.8rem; color:#94A3B8; margin-top:4px;">
+                            Receiver is listening on Serial. Make sure Transmitter is powered ON.
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
                     name, text_color, bg_color = STATES.get(current_label, ("UNKNOWN", "#FFF", "rgba(0,0,0,0.5)"))
                     coord_str = f"({tracker.curr_x:.2f}m, {tracker.curr_y:.2f}m)" if tracker.curr_intensity > 0.1 else "N/A (Empty Room)"
                     speed_str = f"{tracker.speed:.2f} m/s" if tracker.curr_intensity > 0.1 else "0.00 m/s"
@@ -428,31 +441,42 @@ if st.session_state.live_running:
                     </div>
                     """, unsafe_allow_html=True)
 
-                    rssi_card.markdown(f"""
-                    <div class="hud-card">
-                        <div class="hud-title">Live RSSI (Signal Strength)</div>
-                        <div class="hud-value" style="color: #38BDF8;">{latest_rssi} <span style="font-size:0.9rem; color:#64748B;">dBm</span></div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                rssi_card.markdown(f"""
+                <div class="hud-card">
+                    <div class="hud-title">Live RSSI (Signal Strength)</div>
+                    <div class="hud-value" style="color: #38BDF8;">{latest_rssi if packet_counter > 0 else '--'} <span style="font-size:0.9rem; color:#64748B;">dBm</span></div>
+                </div>
+                """, unsafe_allow_html=True)
 
-                    confidence_card.markdown(f"""
-                    <div class="hud-card">
-                        <div class="hud-title">AI Detection Confidence</div>
-                        <div class="hud-value" style="color: #4ADE80;">{current_conf:.1f}%</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                confidence_card.markdown(f"""
+                <div class="hud-card">
+                    <div class="hud-title">AI Detection Confidence</div>
+                    <div class="hud-value" style="color: #4ADE80;">{current_conf:.1f}%</div>
+                </div>
+                """, unsafe_allow_html=True)
 
-                    packets_card.markdown(f"""
-                    <div class="hud-card">
-                        <div class="hud-title">Raw CSI Packets Ingested</div>
-                        <div class="hud-value" style="color: #A78BFA;">{packet_counter:,}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                packets_card.markdown(f"""
+                <div class="hud-card">
+                    <div class="hud-title">Raw CSI Packets Ingested</div>
+                    <div class="hud-value" style="color: #A78BFA;">{packet_counter:,}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
-                # 2. Update Subcarrier Spectrum (Slightly slower rate to conserve frontend bandwidth)
-                if now - last_spectrum_render >= SPECTRUM_INTERVAL:
-                    last_spectrum_render = now
-                    fig_sub, ax_sub = plt.subplots(figsize=(4, 1.8), facecolor="#0E172A")
+            # 2. Update Subcarrier Spectrum
+            if now - last_spectrum_render >= SPECTRUM_INTERVAL and packet_counter > 0:
+                last_spectrum_render = now
+                fig_sub, ax_sub = plt.subplots(figsize=(4, 1.8), facecolor="#0E172A")
+                ax_sub.set_facecolor("#0E172A")
+                ax_sub.bar(range(NUM_SUB), latest_amps, color="#00E5FF", width=0.85, alpha=0.9)
+                ax_sub.set_xlim(-1, 64)
+                ax_sub.set_ylim(0, max(45, max(latest_amps) + 5))
+                ax_sub.set_xlabel("OFDM Subcarrier Index (0-63)", color="#64748B", fontsize=7)
+                ax_sub.set_ylabel("Amplitude", color="#64748B", fontsize=7)
+                ax_sub.tick_params(colors="#64748B", labelsize=6)
+                for spine in ax_sub.spines.values():
+                    spine.set_color("#1E293B")
+                spectrum_placeholder.pyplot(fig_sub)
+                plt.close(fig_sub)
                     ax_sub.set_facecolor("#0E172A")
                     ax_sub.bar(range(NUM_SUB), latest_amps, color="#00E5FF", width=0.85, alpha=0.9)
                     ax_sub.set_xlim(-1, 64)
