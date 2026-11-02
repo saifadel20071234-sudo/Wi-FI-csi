@@ -7,11 +7,17 @@
 #define TARGET_SUBCARRIERS 64
 #define LED_PIN 2
 
-const char* ssid_tx  = "CSI_TX_NODE";
-const char* pass_tx  = "12345678";
-const char* ssid_ext = "CSI_NODE_EXT";
-const char* pass_ext = "12345678";
-const int   channel  = 6;
+// Multi-Node Wi-Fi SSIDs:
+// 1. CSI_TX_NODE (Transmitter ESP32 SoftAP)
+// 2. CSI_TX_NODE_EXT (TP-Link Router / Extender AP)
+// 3. CSI_NODE_EXT (Fallback Router AP)
+const char* networks[][2] = {
+    {"CSI_TX_NODE",     "12345678"},
+    {"CSI_TX_NODE_EXT", "12345678"},
+    {"CSI_NODE_EXT",    "12345678"}
+};
+const int NUM_NETWORKS = 3;
+const int channel = 6;
 
 static char csi_line[700];
 static esp_ping_handle_t ping_handle = NULL;
@@ -39,6 +45,14 @@ void _csi_rx_callback(void *ctx, wifi_csi_info_t *data) {
         float imag = (float)buf[idx];
         float real = (float)buf[idx + 1];
         float amp = sqrtf(real * real + imag * imag);
+
+        // Sanitize hardware AGC byte at index 0 (use adjacent valid data subcarrier)
+        if (i == 0 && raw_sub > 6) {
+            float i6 = (float)buf[12];
+            float r6 = (float)buf[13];
+            amp = sqrtf(r6 * r6 + i6 * i6);
+        }
+
         n += snprintf(csi_line + n, sizeof(csi_line) - n, ",%.1f", amp);
     }
     snprintf(csi_line + n, sizeof(csi_line) - n, ",CSI_END\n");
@@ -100,7 +114,7 @@ void setup() {
 
     Serial.println("\n========================================================");
     Serial.println("  Wi-Fi CSI Fast Multi-Node Receiver (Zero-Delay)");
-    Serial.println("  Nodes: TX (CSI_TX_NODE) + EXT (CSI_NODE_EXT) + RX (COM)");
+    Serial.println("  Nodes: TX (CSI_TX_NODE) + Router (CSI_TX_NODE_EXT) + RX");
     Serial.println("========================================================");
 
     WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
@@ -125,8 +139,10 @@ void setup() {
     WiFi.setAutoReconnect(true);
     WiFi.setSleep(false);
 
-    Serial.println("[WiFi] Fast-connecting directly on Channel 6...");
-    WiFi.begin(ssid_tx, pass_tx, channel);
+    Serial.print("[WiFi] Fast-connecting to ");
+    Serial.print(networks[0][0]);
+    Serial.println(" directly on Channel 6...");
+    WiFi.begin(networks[0][0], networks[0][1], channel);
     last_connect_attempt = millis();
 }
 
@@ -143,10 +159,10 @@ void loop() {
         }
     } else {
         digitalWrite(LED_PIN, LOW);
-        if (millis() - last_connect_attempt > 3500) {
-            current_network_idx = (current_network_idx + 1) % 2;
-            const char* next_ssid = (current_network_idx == 0) ? ssid_tx : ssid_ext;
-            const char* next_pass = (current_network_idx == 0) ? pass_tx : pass_ext;
+        if (millis() - last_connect_attempt > 3200) {
+            current_network_idx = (current_network_idx + 1) % NUM_NETWORKS;
+            const char* next_ssid = networks[current_network_idx][0];
+            const char* next_pass = networks[current_network_idx][1];
             Serial.print("[WiFi] Retrying with: ");
             Serial.println(next_ssid);
             WiFi.disconnect();

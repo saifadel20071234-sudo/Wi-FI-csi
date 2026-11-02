@@ -240,6 +240,25 @@ with st.sidebar:
     baud_rate = st.selectbox("Baud rate", (115200, 460800, 921600), index=0, key="receiver_baud")
 
     st.divider()
+    st.markdown("### 🎯 معايرة خط الأساس (Room Baseline)")
+    if st.button("🚀 معايرة الغرفة الفارغة (Calibrate)", help="تسجيل خط أساس الغرفة الفارغة لضبط عتبة Z-Score العلمية بدقة"):
+        try:
+            baseline_path = os.path.join(ROOT_DIR, "data", "baseline.npz")
+            raw_empty_path = os.path.join(ROOT_DIR, "data", "raw", "raw_label0_empty_room.csv")
+            if os.path.exists(raw_empty_path):
+                import numpy as np
+                import pandas as pd
+                df_b = pd.read_csv(raw_empty_path)
+                amp_cols = [f"amp_{i}" for i in range(64)]
+                b_amps = df_b[amp_cols].values
+                b_amps[:, 0] = b_amps[:, 6]
+                np.savez(baseline_path, mean=np.mean(b_amps, axis=0), std=np.std(b_amps, axis=0) + 1e-6)
+                st.session_state.live_state.load_baseline(baseline_path)
+                st.success("✅ تم تحديث ومعايرة خط الأساس للغرفة بنجاح!")
+        except Exception as e:
+            st.error(f"خطأ في المعايرة: {e}")
+
+    st.divider()
     st.markdown("### 🎮 وضع المحاكاة والاختبار (Demo Mode)")
     demo_active = st.checkbox("تفعيل وضع المحاكاة التفاعلي", value=st.session_state.demo_mode)
     st.session_state.demo_mode = demo_active
@@ -402,6 +421,7 @@ def live_panel() -> None:
         else:
             st.success("🟢 عقد الرصد الثلاث (TX, EXT, RX) متزامنة 100%")
 
+        st.metric("مؤشر الشذوذ الحركي (Z-Score)", f"{state.z_score:.2f}", border=True)
         st.metric("طاقة الاضطراب الكلية (RF Energy)", f"{state.motion_energy:.2f}", border=True)
         st.metric("إجمالي الفريمات الملتقطة", state.packet_count, border=True)
 

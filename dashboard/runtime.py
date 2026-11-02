@@ -7,6 +7,7 @@ prevents Streamlit reruns from throwing away the CSI window.
 
 from __future__ import annotations
 
+import os
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -229,6 +230,24 @@ class LiveCSIState:
     zone_probabilities: dict[int, float] = field(default_factory=dict)
     last_timestamp_ms: int | None = None
     motion_energy: float = 0.0
+    baseline_mean: np.ndarray | None = None
+    baseline_std: np.ndarray | None = None
+    z_score: float = 0.0
+
+    def load_baseline(self, path: str = "data/baseline.npz") -> bool:
+        """Load empty room calibrated baseline if available."""
+        try:
+            if not os.path.isabs(path):
+                root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                path = os.path.join(root, path)
+            if os.path.exists(path):
+                data = np.load(path)
+                self.baseline_mean = data["mean"]
+                self.baseline_std = data["std"]
+                return True
+        except Exception:
+            pass
+        return False
 
     def reset(self) -> None:
         self.window.clear()
@@ -246,6 +265,8 @@ class LiveCSIState:
         self.zone_probabilities = {}
         self.last_timestamp_ms = None
         self.motion_energy = 0.0
+        self.z_score = 0.0
+        self.load_baseline()
 
     def ingest(
         self,
@@ -294,6 +315,16 @@ class LiveCSIState:
         var_center = float(np.mean(sub_var[17:35]))
         var_right = float(np.mean(sub_var[35:]))
         self.motion_energy = var_left + var_center + var_right
+
+        # Compute Z-score anomaly against calibrated empty-room baseline
+        if self.baseline_mean is not None and self.baseline_std is not None:
+            curr_amps = np.asarray(amplitudes, dtype=float)
+            curr_valid = curr_amps[6:58]
+            b_mean = self.baseline_mean[6:58]
+            b_std = self.baseline_std[6:58]
+            self.z_score = float(np.mean(np.abs(curr_valid - b_mean) / (b_std + 1e-6)))
+        else:
+            self.z_score = float(temporal_var_mean) / 0.60
 
         # ------------------------------------------------------------------
         # 100% ACCURATE EMPTY ROOM & PEOPLE COUNTING LOGIC (0 to 5)
