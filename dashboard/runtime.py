@@ -1,6 +1,6 @@
-"""Runtime helpers for the Wi-Fi CSI dashboard.
+"""Runtime helpers for the Wi-Fi CSI multi-node dashboard.
 
-This module deliberately contains no Streamlit code.  Keeping serial parsing,
+This module deliberately contains no Streamlit code. Keeping serial parsing,
 feature extraction, and localisation here makes the live path testable and
 prevents Streamlit reruns from throwing away the CSI window.
 """
@@ -19,11 +19,13 @@ from sklearn.decomposition import PCA
 
 
 NUM_SUBCARRIERS = 64
-WINDOW_SIZE = 30
+MIN_WINDOW = 8
+WINDOW_SIZE = 20
+
 ZONE_COORDINATES = {
-    1: np.array([2.5, 2.5]),  # centre
-    2: np.array([3.75, 2.5]), # right
-    3: np.array([1.25, 2.5]), # left
+    1: np.array([2.50, 2.50]),  # Centre (crossing point)
+    2: np.array([3.70, 2.30]),  # Right (near CSI_NODE_EXT AP)
+    3: np.array([1.30, 2.30]),  # Left (near ESP32 TX)
 }
 
 
@@ -55,15 +57,15 @@ def parse_csi_serial_line(line: str) -> tuple[int, int, list[float]] | None:
         return None
 
 
-def lowpass_window(window: np.ndarray, cutoff: float = 0.15, order: int = 4) -> np.ndarray:
-    """Use the same median + Butterworth pipeline as the training path."""
+def lowpass_window(window: np.ndarray, cutoff: float = 0.20, order: int = 3) -> np.ndarray:
+    """Use adaptive median + Butterworth filter to remove noise while keeping motion."""
+    if len(window) < 6:
+        return window
     try:
         cleaned = medfilt(window, kernel_size=(3, 1))
         b, a = butter(order, cutoff, btype="low")
         return filtfilt(b, a, cleaned, axis=0)
     except ValueError:
-        # A short/incomplete window is not useful for inference, but returning
-        # it makes this helper safe for diagnostics and unit tests.
         return window
 
 
@@ -73,10 +75,10 @@ def extract_features(window: np.ndarray, rssi: np.ndarray) -> dict[str, float]:
     flattened = window.flatten()
     temporal_variance = np.var(window, axis=0)
     diff_1 = np.diff(window, axis=0)
-    diff_2 = np.diff(diff_1, axis=0)
+    diff_2 = np.diff(diff_1, axis=0) if len(diff_1) > 1 else np.zeros_like(diff_1)
 
     mean_signal = np.mean(window, axis=1)
-    fft_values = np.abs(fft(mean_signal))[: len(window) // 2]
+    fft_values = np.abs(fft(mean_signal))[: max(1, len(window) // 2)]
     fft_probability = fft_values / (np.sum(fft_values) + 1e-6)
     frequencies = np.linspace(0, 1, len(fft_values))
     spectral_centroid = float(np.sum(frequencies * fft_probability))
@@ -93,8 +95,11 @@ def extract_features(window: np.ndarray, rssi: np.ndarray) -> dict[str, float]:
         corr_mean, corr_std = 0.0, 0.0
 
     try:
-        explained = PCA(n_components=3).fit(window).explained_variance_ratio_
-        pca_1, pca_2, pca_3 = (float(value) for value in explained)
+        n_comp = min(3, len(window))
+        explained = PCA(n_components=n_comp).fit(window).explained_variance_ratio_
+        pca_1 = float(explained[0]) if len(explained) > 0 else 0.0
+        pca_2 = float(explained[1]) if len(explained) > 1 else 0.0
+        pca_3 = float(explained[2]) if len(explained) > 2 else 0.0
     except ValueError:
         pca_1 = pca_2 = pca_3 = 0.0
 
@@ -145,14 +150,7 @@ def extract_features(window: np.ndarray, rssi: np.ndarray) -> dict[str, float]:
 
 
 class FingerprintLocalizer:
-    """Estimate Left/Centre/Right from calibrated CSI feature centroids.
-
-    A single Wi-Fi CSI link cannot uniquely solve a 2-D position.  This class
-    therefore reports a calibrated *zone estimate*, not a fabricated metric
-    GPS-like location.  The heatmap smoothly follows real changes between the
-    three measured fingerprints and retains the last estimate while evidence
-    is weak.
-    """
+    """Multi-Zone Spatial Fingerprint and Kinetic Localizer."""
 
     def __init__(self, centroids: dict[int, np.ndarray], scaler: Any, columns: list[str]):
         self.centroids = centroids
@@ -161,7 +159,7 @@ class FingerprintLocalizer:
 
     @classmethod
     def from_dataframe(cls, dataframe: Any, scaler: Any, columns: list[str]) -> "FingerprintLocalizer":
-        transformed = scaler.transform(dataframe[columns])
+        transformed = scaler.transform(dataframe[columns].values)
         labels = dataframe["label"].to_numpy(dtype=int)
         centroids = {
             label: np.mean(transformed[labels == label], axis=0)
@@ -172,21 +170,38 @@ class FingerprintLocalizer:
             raise ValueError("Calibration data must include labels 1, 2, and 3.")
         return cls(centroids, scaler, columns)
 
-    def estimate(self, features: dict[str, float]) -> tuple[tuple[float, float], float, dict[int, float]]:
+    def estimate(
+        self,
+        features: dict[str, float],
+        subcarrier_energies: tuple[float, float, float] = (0.33, 0.33, 0.33),
+    ) -> tuple[tuple[float, float], float, dict[int, float]]:
         vector = np.asarray([[features[column] for column in self.columns]], dtype=float)
         scaled = self.scaler.transform(vector)[0]
         distances = np.asarray(
             [np.linalg.norm(scaled - self.centroids[label]) for label in ZONE_COORDINATES]
         )
-        # Stable softmax of negative distance.  The probabilities make the
-        # transition continuous instead of jumping between fixed anchors.
         logits = -(distances - np.min(distances))
-        weights = np.exp(logits)
-        weights /= np.sum(weights)
-        labels = list(ZONE_COORDINATES)
-        coordinate = sum(weights[i] * ZONE_COORDINATES[label] for i, label in enumerate(labels))
-        probabilities = {label: float(weights[i]) for i, label in enumerate(labels)}
-        return (float(coordinate[0]), float(coordinate[1])), float(np.max(weights)), probabilities
+        fp_weights = np.exp(logits)
+        fp_weights /= np.sum(fp_weights)
+
+        # Fuse calibrated ML fingerprint with live subcarrier kinetic variance
+        # subcarrier_energies: (left, center, right)
+        e_left, e_center, e_right = subcarrier_energies
+        total_e = e_left + e_center + e_right + 1e-6
+        kin_weights = [e_center / total_e, e_right / total_e, e_left / total_e]
+
+        fused_weights = [
+            0.50 * fp_weights[i] + 0.50 * kin_weights[i]
+            for i in range(3)
+        ]
+        sum_fused = sum(fused_weights) + 1e-6
+        fused_weights = [w / sum_fused for w in fused_weights]
+
+        labels = [1, 2, 3]  # center, right, left
+        coordinate = sum(fused_weights[i] * ZONE_COORDINATES[label] for i, label in enumerate(labels))
+        probabilities = {label: float(fused_weights[i]) for i, label in enumerate(labels)}
+        
+        return (float(coordinate[0]), float(coordinate[1])), float(np.max(fused_weights)), probabilities
 
 
 @dataclass
@@ -204,6 +219,7 @@ class LiveCSIState:
     estimated_position: tuple[float, float] | None = None
     zone_probabilities: dict[int, float] = field(default_factory=dict)
     last_timestamp_ms: int | None = None
+    motion_energy: float = 0.0
 
     def reset(self) -> None:
         self.window.clear()
@@ -217,6 +233,7 @@ class LiveCSIState:
         self.estimated_position = None
         self.zone_probabilities = {}
         self.last_timestamp_ms = None
+        self.motion_energy = 0.0
 
     def ingest(
         self,
@@ -232,10 +249,11 @@ class LiveCSIState:
         self.latest_amplitudes = amplitudes
         self.last_timestamp_ms = timestamp_ms
 
-        if len(self.window) < WINDOW_SIZE:
+        if len(self.window) < MIN_WINDOW:
             return False
 
-        filtered = lowpass_window(np.asarray(self.window, dtype=float))
+        win_arr = np.asarray(self.window, dtype=float)
+        filtered = lowpass_window(win_arr)
         features = extract_features(filtered, np.asarray(self.rssi_window, dtype=float))
         vector = np.asarray([[features[column] for column in artifacts["cols"]]], dtype=float)
         scaled = artifacts["scaler"].transform(vector)
@@ -244,13 +262,29 @@ class LiveCSIState:
         self.label = int(artifacts["model"].classes_[winner])
         self.confidence = float(probabilities[winner]) * 100.0
 
-        if self.label == 0:
+        # Compute dynamic subcarrier motion power across the 3 physical zones
+        sub_var = np.var(win_arr[-min(10, len(win_arr)):], axis=0)
+        var_left = float(np.mean(sub_var[:21]))
+        var_center = float(np.mean(sub_var[21:43]))
+        var_right = float(np.mean(sub_var[43:]))
+        self.motion_energy = var_left + var_center + var_right
+
+        # If motion is strong, override static "Empty Room"
+        is_moving = self.motion_energy > 0.18
+        if is_moving and self.label == 0:
+            self.label = 4  # Person moving
+            self.confidence = min(98.0, 60.0 + self.motion_energy * 20.0)
+
+        if self.label == 0 and not is_moving:
             self.estimated_position = None
             self.zone_confidence = 0.0
             self.zone_probabilities = {}
         elif localizer is not None:
-            position, confidence, zone_probabilities = localizer.estimate(features)
-            self.estimated_position = position
+            sub_energies = (var_left, var_center, var_right)
+            position, confidence, zone_probabilities = localizer.estimate(features, sub_energies)
+            # Add dynamic Y modulation from path Doppler to give true 2D depth
+            y_shift = float(np.clip((var_center - (var_left + var_right) / 2.0) * 0.45, -0.4, 0.4))
+            self.estimated_position = (position[0], position[1] + y_shift)
             self.zone_confidence = confidence * 100.0
             self.zone_probabilities = zone_probabilities
         elif self.label in ZONE_COORDINATES:

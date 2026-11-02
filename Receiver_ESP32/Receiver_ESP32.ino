@@ -1,25 +1,19 @@
 #include <WiFi.h>
-#include <WiFiUdp.h>
+#include <WiFiMulti.h>
 #include "esp_wifi.h"
 #include "ping/ping_sock.h"
 #include <math.h>
 
-const char* ssid     = "CSI_TX_NODE";
-const char* password = "12345678";
-const int   channel  = 6;
 #define TARGET_SUBCARRIERS 64
 #define LED_PIN 2
 
+static WiFiMulti wifiMulti;
 static char csi_line[700];
 static esp_ping_handle_t ping_handle = NULL;
+static bool csi_initialized = false;
 
 void _csi_rx_callback(void *ctx, wifi_csi_info_t *data) {
     if (data == NULL || data->buf == NULL || data->len < 2) return;
-
-    // Filter packets: accept if from our transmitter MAC (ends with 4b:59:1d)
-    if (data->mac[3] != 0x4b || data->mac[4] != 0x59 || data->mac[5] != 0x1d) {
-        return;
-    }
 
     int len = data->len;
     int raw_sub = len / 2;
@@ -42,15 +36,23 @@ void _csi_rx_callback(void *ctx, wifi_csi_info_t *data) {
     Serial.print(csi_line);
 }
 
-void startContinuousPing() {
-    if (ping_handle != NULL) return;
+void startContinuousPing(IPAddress gateway) {
+    if (ping_handle != NULL) {
+        esp_ping_stop(ping_handle);
+        esp_ping_delete_session(ping_handle);
+        ping_handle = NULL;
+    }
 
     esp_ping_config_t ping_config = ESP_PING_DEFAULT_CONFIG();
     ip_addr_t target_addr;
-    ipaddr_aton("192.168.4.1", &target_addr);
+    if (gateway[0] == 0) {
+        ipaddr_aton("192.168.4.1", &target_addr);
+    } else {
+        ipaddr_aton(gateway.toString().c_str(), &target_addr);
+    }
     ping_config.target_addr = target_addr;
     ping_config.interval_ms = 50; // 20 pings per second
-    ping_config.count = 0;       // Continuous forever
+    ping_config.count = 0;        // Continuous forever
 
     esp_ping_callbacks_t cbs = {
         .cb_args = NULL,
@@ -64,6 +66,7 @@ void startContinuousPing() {
 }
 
 void setupCSI() {
+    if (csi_initialized) return;
     wifi_csi_config_t csi_config = {
         .lltf_en = true,
         .htltf_en = true,
@@ -75,6 +78,7 @@ void setupCSI() {
     esp_wifi_set_csi_config(&csi_config);
     esp_wifi_set_csi_rx_cb(&_csi_rx_callback, NULL);
     esp_wifi_set_csi(true);
+    csi_initialized = true;
 }
 
 void setup() {
@@ -85,37 +89,38 @@ void setup() {
     Serial.begin(115200);
     delay(400);
 
-    Serial.println("\n==========================================");
-    Serial.println("  Wi-Fi CSI Receiver Active (Active Ping Engine)");
-    Serial.println("==========================================");
-
-    WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
-        if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
-            digitalWrite(LED_PIN, HIGH);
-            setupCSI();
-            startContinuousPing();
-            Serial.print("Connected! IP: ");
-            Serial.println(WiFi.localIP());
-            Serial.println("CSI Engine Initialized & Ping Active!");
-        } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
-            digitalWrite(LED_PIN, LOW);
-            Serial.print("[WiFi] Disconnected, reason: ");
-            Serial.println(info.wifi_sta_disconnected.reason);
-            WiFi.begin(ssid, password, channel);
-        }
-    });
+    Serial.println("\n========================================================");
+    Serial.println("  Wi-Fi CSI Multi-Node Receiver (Active Dual AP Engine)");
+    Serial.println("  Nodes: TX (CSI_TX_NODE) + EXT (CSI_NODE_EXT) + RX (COM)");
+    Serial.println("========================================================");
 
     WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(true);
     WiFi.setSleep(false);
-    WiFi.begin(ssid, password, channel);
+
+    // Register primary Transmitter AP and Extender AP
+    wifiMulti.addAP("CSI_TX_NODE", "12345678");
+    wifiMulti.addAP("CSI_NODE_EXT", "12345678");
+    wifiMulti.addAP("CSI_NODE_EXT", ""); // In case open network
 }
 
 void loop() {
-    if (WiFi.status() == WL_CONNECTED) {
+    if (wifiMulti.run() == WL_CONNECTED) {
         digitalWrite(LED_PIN, HIGH);
+        if (!csi_initialized) {
+            setupCSI();
+            startContinuousPing(WiFi.gatewayIP());
+            Serial.print("[WiFi] Connected to: ");
+            Serial.print(WiFi.SSID());
+            Serial.print(" | IP: ");
+            Serial.print(WiFi.localIP());
+            Serial.print(" | Gateway: ");
+            Serial.println(WiFi.gatewayIP());
+            Serial.println("CSI Engine Active & 20Hz Unicast Ping Streaming!");
+        }
     } else {
         digitalWrite(LED_PIN, LOW);
+        csi_initialized = false;
+        delay(200);
     }
-    delay(100);
+    delay(50);
 }

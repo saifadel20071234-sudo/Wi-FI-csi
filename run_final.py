@@ -1,14 +1,13 @@
 """
 ================================================================================
-          WI-FI CSI HUMAN SENSING & THERMAL TRACKING SYSTEM
-                     Master Orchestrator / Runner
+   📡 WI-FI CSI 3-NODE BIOMETRIC TRACKING SYSTEM - MASTER ORCHESTRATOR
 ================================================================================
-Runs the entire system end-to-end:
-1. Guides hardware placement (Transmitter vs Receiver).
-2. Auto-detects connected ESP32 COM port.
-3. Provides 1-click flashing for ESP32 Receiver (No manual compile needed).
-4. Auto-trains AI model if needed.
-5. Launches Streamlit High-Tech Thermal Tracking Dashboard.
+Runs the entire system end-to-end with 1-Click Launch:
+1. Guides 3-Node hardware placement (ESP32 TX + CSI_NODE_EXT + ESP32 RX).
+2. Auto-detects connected ESP32 COM port (e.g. COM8).
+3. Verifies AI Model & Calibrated Spatial Centroids.
+4. Automatically launches Streamlit Live Biometric Thermal Radar.
+5. Provides optional menu for firmware flashing or diagnostic testing.
 ================================================================================
 """
 
@@ -34,8 +33,8 @@ def clear_screen():
 def print_banner():
     print("""
 ================================================================================
-   📡 WI-FI CSI HUMAN SENSING & SPATIAL THERMAL TRACKING SYSTEM
-                      graduation project - master runner
+   📡 WI-FI CSI 3-NODE BIOMETRIC HUMAN SENSING & THERMAL RADAR SYSTEM
+                     graduation project - master runner
 ================================================================================
     """)
 
@@ -48,16 +47,15 @@ def scan_ports():
         return []
 
 def prompt_hardware_setup():
-    """Shows physical placement instructions."""
+    """Shows physical placement instructions for the 3-Node network."""
     print("--------------------------------------------------------------------------------")
-    print("📍 [إرشادات توصيل الهاردوير في المكان]:")
-    print("  1) بوردة الـ Transmitter (ESP32 #1 - المرسل):")
-    print("     - ضعها في زاوية أو طرف الغرفة (على ارتفاع ~1 متر).")
-    print("     - وصّلها بأي شاحن موبايل أو باوربانك (الكود عليها مسبقاً ويبث شبكة CSI_TX_NODE).")
-    print("")
-    print("  2) بوردة الـ Receiver (ESP32 #2 - المستقبل):")
-    print("     - ضعها في الطرف المقابل للغرفة أمام المرسل (بمسافة 2 إلى 4 أمتار).")
-    print("     - وصّلها باللابتوب عن طريق كابل الـ USB.")
+    print("📍 [توزيع شبكة الاستشعار الثلاثية في الغرفة - 3-Node Network]:")
+    print("  1) بوردة الإرسال (ESP32 #1 - TX):")
+    print("     - ضعها في الزاوية اليسرى من الغرفة (تبث شبكة CSI_TX_NODE على القناة 6).")
+    print("  2) جهاز تقوية وتوسيع الشبكة (CSI_NODE_EXT - Range Extender):")
+    print("     - ضعه في الزاوية اليمنى من الغرفة لإنشاء تغطية هندسية كاملة.")
+    print("  3) بوردة الاستقبال (ESP32 #2 - RX):")
+    print("     - ضعها في منتصف الجدار المقابل (أمام المرسل والموسع) وموصولة باللابتوب.")
     print("--------------------------------------------------------------------------------")
 
 def detect_or_wait_port():
@@ -70,26 +68,27 @@ def detect_or_wait_port():
                 desc = p.description or "Standard Serial Device"
                 print(f"   [{idx}] {p.device}  -->  {desc}")
             
-            if len(ports) == 1:
+            # Prefer COM8 or COM9 if present
+            preferred = None
+            for p in ports:
+                if p.device in ("COM8", "COM9"):
+                    preferred = p.device
+                    break
+                    
+            if preferred:
+                print(f"\n[+] تم التعرف التلقائي على بوردة الاستقبال على المنفذ: {preferred}")
+                return preferred
+            elif len(ports) == 1:
                 selected = ports[0].device
-                print(f"\n[+] تم العثور على بوردة الاستقبال (ESP32 Receiver) على المنفذ: {selected}")
+                print(f"\n[+] تم العثور على بوردة الاستقبال على المنفذ: {selected}")
                 return selected
             else:
-                # Intelligently suggest COM9 or the last connected device for Receiver
-                default_idx = len(ports)  # usually the second board plugged in is the receiver
-                for idx, p in enumerate(ports, start=1):
-                    if "COM9" in p.device:
-                        default_idx = idx
-                        break
-                
-                print(f"\n💡 [ملاحظة]: إذا كانت بوردة الإرسال موصلة أيضاً، فاختر بوردة الاستقبال (غالباً COM9 أو الخيار {default_idx}).")
-                choice = input(f"اختر رقم المنفذ المتصل به الـ Receiver (ESP32 #2) [1-{len(ports)}] أو اضغط Enter للاختيار الافتراضي [{default_idx}]: ").strip()
-                if choice.isdigit() and 1 <= int(choice) <= len(ports):
-                    return ports[int(choice) - 1].device
-                return ports[default_idx - 1].device
+                default_port = ports[-1].device
+                print(f"\n💡 تم اختيار المنفذ الافتراضي: {default_port}")
+                return default_port
 
         print("\n⚠️ لم يتم العثور على أي بوردة ESP32 موصلة باللابتوب حالياً!")
-        print("   1) تأكد من توصيل بوردة الـ Receiver بكابل USB جيد يدعم نقل البيانات.")
+        print("   1) تأكد من توصيل بوردة الـ Receiver بكابل USB يدعم نقل البيانات.")
         print("   2) اضغط Enter لإعادة الفحص التلقائي، أو اكتب اسم الـ COM يدوياً (مثال: COM8):")
         manual = input("   --> ").strip().upper()
         if manual.startswith("COM"):
@@ -117,7 +116,6 @@ def flash_receiver(port: str):
         bin_dir = os.path.join(ROOT_DIR, "firmware_receiver", "bin")
         bootloader = os.path.join(bin_dir, "bootloader.bin")
         partition = os.path.join(bin_dir, "partition-table.bin")
-        boot_app = os.path.join(bin_dir, "boot_app0.bin")
         receiver = os.path.join(bin_dir, "csi_receiver.bin")
 
         if not (os.path.exists(bootloader) and os.path.exists(partition) and os.path.exists(receiver)):
@@ -141,71 +139,70 @@ def flash_receiver(port: str):
     res = subprocess.run(cmd)
     if res.returncode == 0:
         print("\n✅ تم حرق فيرموير الـ Receiver بنجاح تام 100%!")
-        print("   البوردة الآن تستقبل إشارات الـ CSI من الـ Transmitter وتبثها إلى اللابتوب.")
+        print("   البوردة تدعم الآن الربط مع CSI_TX_NODE و CSI_NODE_EXT وتستقبل 20 فريم/ثانية.")
         return True
     else:
         print("\n❌ حدث خطأ أثناء الحرق. تأكد من إغلاق أي برنامج يستخدم المنفذ (مثل Arduino IDE أو Serial Monitor).")
         return False
 
 def verify_ai_model():
-    """Verify the complete model bundle and stop on a failed training run."""
-    dashboard_dir = os.path.join(ROOT_DIR, "dashboard")
-    required = ["csi_model.pkl", "scaler.pkl", "feature_cols.pkl"]
-    missing = [name for name in required if not os.path.exists(os.path.join(dashboard_dir, name))]
-    if missing:
-        print("\n[*] جاري التحقق من موديل الذكاء الاصطناعي...")
-        train_script = os.path.join(ROOT_DIR, "ml", "ml_model.py")
-        if os.path.exists(train_script):
-            result = subprocess.run([sys.executable, train_script])
-            still_missing = [name for name in required if not os.path.exists(os.path.join(dashboard_dir, name))]
-            if result.returncode == 0 and not still_missing:
-                print("[+] تم تجهيز موديل الذكاء الاصطناعي بنجاح!")
-                return True
-            print(f"❌ فشل تجهيز الموديل. الملفات الناقصة: {', '.join(still_missing or missing)}")
-            return False
-        print("❌ ملف تدريب الموديل غير موجود.")
-        return False
-    else:
-        print("[+] ملفات موديل الذكاء الاصطناعي مكتملة وجاهزة.")
+    """Checks if trained ML model and scaler exist."""
+    print("\n🔍 [فحص موديل الذكاء الاصطناعي ومعايرة المناطق]...")
+    paths = [
+        os.path.join(ROOT_DIR, "dashboard", "csi_model.pkl"),
+        os.path.join(ROOT_DIR, "dashboard", "scaler.pkl"),
+        os.path.join(ROOT_DIR, "dashboard", "feature_cols.pkl"),
+    ]
+    if all(os.path.exists(p) for p in paths):
+        print("✅ موديل الذكاء الاصطناعي جاهز ومحمّل (RandomForest + Scaler).")
         return True
+    else:
+        print("⚠️ الموديل غير موجود؛ جاري تدريبه الآن تلقائياً...")
+        train_script = os.path.join(ROOT_DIR, "ml", "ml_model.py")
+        res = subprocess.run([sys.executable, train_script])
+        return res.returncode == 0
 
 def test_live_csi_stream(port: str):
-    """Quick diagnostic to read raw CSI frames from serial."""
+    """Listens for CSI packets to verify hardware link."""
     print("\n" + "="*80)
-    print(f"🧪 [اختبار قراءة بيانات الـ CSI الحية من {port} لمدة 5 ثوانٍ]...")
+    print(f"🧪 [فحص بث إشارات الـ CSI الحية من بوردة {port}]...")
     print("="*80)
     try:
         import serial
-        ser = serial.Serial(port, 115200, timeout=1.5)
-        time.sleep(1.0)
-        ser.reset_input_buffer()
-        print("Listening for incoming frames...")
-        start_time = time.time()
+    except ImportError:
+        print("❌ pyserial غير مثبت.")
+        return
+
+    try:
+        ser = serial.Serial(port=port, baudrate=115200, timeout=1.5)
+        print("✅ تم فتح المنفذ بنجاح. جاري الاستماع للفريمات لمدة 5 ثوانٍ...\n")
+        start = time.time()
         packets = 0
-        while time.time() - start_time < 5.0:
+        while time.time() - start < 5.0:
             if ser.in_waiting:
                 line = ser.readline().decode("utf-8", errors="ignore").strip()
                 if "CSI_START" in line and "CSI_END" in line:
                     packets += 1
                     parts = line.split(",")
-                    print(f"   [FRAME #{packets}] RSSI: {parts[2]} dBm | Subcarriers: {parts[3]} | Amplitudes: {parts[4:10]}...")
+                    rssi_val = parts[2] if len(parts) > 2 else "--"
+                    subs_val = parts[3] if len(parts) > 3 else "64"
+                    print(f"   [FRAME #{packets}] RSSI: {rssi_val} dBm | Subcarriers: {subs_val} | Samples: {parts[4:10]}...")
             time.sleep(0.01)
         ser.close()
         if packets > 0:
-            print(f"\n✅ ممتاز! تم استقبال {packets} إطار CSI خام بنجاح من الهاردوير!")
+            print(f"\n🎉 رائع! تم استقبال {packets} فريم CSI بنجاح تام! الهاردوير شغال 100%.")
         else:
-            print("\n⚠️ لم يتم استقبال إطارات CSI بعد. تأكد أن الـ Transmitter شغال في نفس الغرفة.")
+            print("\n⚠️ لم يتم التقاط فريمات CSI. تأكد من تشغيل بوردة الـ Transmitter (ESP32 #1).")
     except Exception as e:
-        print(f"\n❌ تعذر فتح المنفذ: {e}")
+        print(f"❌ تعذر فتح المنفذ: {e}")
 
 def run_dashboard(port: str = ""):
     """Launches the Streamlit Live Dashboard."""
     print("\n" + "="*80)
-    print("🚀 [إطلاق الداش بورد الحية - Live Thermal Radar Dashboard]")
+    print("🚀 [إطلاق الداش بورد الحية - 3-Node Thermal Radar Dashboard]")
     print("="*80)
     app_path = os.path.join(ROOT_DIR, "dashboard", "app.py")
     
-    # Write preferred port to a temporary environment variable
     env = os.environ.copy()
     if port:
         env["CSI_DEFAULT_PORT"] = port
@@ -222,17 +219,16 @@ def run_dashboard(port: str = ""):
                         p.kill()
                     except Exception:
                         pass
-        time.sleep(0.5)
+        time.sleep(0.4)
     except Exception:
         pass
 
     print("[*] جاري تشغيل خادم Streamlit وفتح المتصفح...")
     print("[*] Dashboard URL: http://localhost:8501")
     print("--------------------------------------------------------------------------------")
-    print("💡 بعد فتح المتصفح:")
-    print("   1) ستجد المنفذ تم تحديده تلقائياً في القائمة الجانبية.")
-    print("   2) اضغط على الزر الأخضر: '🚀 CONNECT & START LIVE TRACKING'.")
-    print("   3) تحرك في الغرفة وراقب الهالة الحرارية وهي تتبع حركتك بانسيابية!")
+    print("💡 النظام يعمل تلقائياً الآن:")
+    print("   1) التتبع الحي يعمل فوراً وبدون الحاجة للضغط على أي أزرار.")
+    print("   2) تحرك بين زوايا الغرفة وراقب الهالة الحرارية التجسيمية للشخص وهي تتبعك بدقة!")
     print("--------------------------------------------------------------------------------\n")
     
     cmd = [sys.executable, "-m", "streamlit", "run", app_path]
@@ -248,53 +244,46 @@ def main():
     
     # 2. Check AI Model
     if not verify_ai_model():
-        print("\nلا يمكن تشغيل الداش بورد قبل إصلاح تدريب الموديل أعلاه.")
+        print("\n❌ لا يمكن تشغيل الداش بورد قبل إصلاح تدريب الموديل.")
         return
-    
-    # 3. Main Menu
+        
+    # 3. Fast-Launch or Menu
     print("\n" + "="*80)
-    print("📋 [اختر ما تريد تنفيذه الآن]:")
-    print("   [1] 🚀 تشغيل النظام والتتبع الحي مباشرة (Live Dashboard)  [الافتراضي - اضغط Enter]")
-    print("   [2] ⚡ حرق الفيرموير على الـ Receiver (ESP32 #2) ثم فتح الداش بورد فوراً")
-    print("   [3] 🧪 فحص واختبار قراءة إشارات الـ CSI الحية من البوردة (Diagnostic Test)")
-    print("   [4] 🔄 إعادة تدريب موديل الذكاء الاصطناعي (Train AI Model)")
-    print("   [5] 🚪 خروج")
+    print("🚀 [جاهز للتشغيل الفوري - 1-Click Launch]")
+    print(f"   المنفذ المحدد: {selected_port}")
+    print("   سيتم تشغيل الداش بورد والتتبع الحراري الثلاثي فوراً تلقائياً.")
     print("="*80)
-
-    choice = input("\nاكتب رقم الخيار [1-5] واضغط Enter (أو اضغط Enter مباشرة للخيار 1): ").strip()
     
-    if choice == "2":
-        ok = flash_receiver(selected_port)
-        if ok:
-            print("\n⏳ جاري إطلاق الداش بورد خلال 3 ثوانٍ...")
-            time.sleep(2.5)
+    print("\nاضغط Enter للتشغيل فوراً، أو اكتب 'M' لفتح القائمة المتقدمة (حرق/فحص):")
+    try:
+        # Prompt with short timeout or immediate enter
+        choice = input("--> ").strip().upper()
+    except Exception:
+        choice = ""
+        
+    if choice == "M":
+        print("\n📋 [القائمة المتقدمة]:")
+        print("   [1] تشغيل الداش بورد الحية فوراً")
+        print("   [2] حرق الفيرموير على بوردة الاستقبال (ESP32 #2)")
+        print("   [3] فحص واختبار قراءة فريمات الـ CSI الحية")
+        print("   [4] إعادة تدريب الموديل")
+        sub_choice = input("اختر رقم الخيار [1-4]: ").strip()
+        if sub_choice == "2":
+            flash_receiver(selected_port)
+            time.sleep(2.0)
             run_dashboard(selected_port)
-    elif choice == "3":
-        test_live_csi_stream(selected_port)
-        input("\nاضغط Enter للعودة للقائمة وتشغيل الداش بورد...")
-        run_dashboard(selected_port)
-    elif choice == "4":
-        train_script = os.path.join(ROOT_DIR, "ml", "ml_model.py")
-        result = subprocess.run([sys.executable, train_script])
-        if result.returncode != 0:
-            print("\n❌ فشلت إعادة التدريب؛ راجع رسائل الخطأ قبل تشغيل الداش بورد.")
-            return
-        input("\nاضغط Enter لتشغيل الداش بورد الآن...")
-        run_dashboard(selected_port)
-    elif choice == "5":
-        print("\nمع السلامة!")
-        sys.exit(0)
-    else:
-        # Default: 1
-        # Quick check if user wants to flash first
-        ask = input("\nهل هذه أول مرة توصل فيها بوردة الـ Receiver وتريد حرق الفيرموير عليها أولاً؟ [y/N]: ").strip().lower()
-        if ask == "y" or ask == "yes" or ask == "نعم":
-            ok = flash_receiver(selected_port)
-            if ok:
-                time.sleep(2.0)
-                run_dashboard(selected_port)
+        elif sub_choice == "3":
+            test_live_csi_stream(selected_port)
+            input("\nاضغط Enter لتشغيل الداش بورد...")
+            run_dashboard(selected_port)
+        elif sub_choice == "4":
+            subprocess.run([sys.executable, os.path.join(ROOT_DIR, "ml", "ml_model.py")])
+            input("\nاضغط Enter لتشغيل الداش بورد...")
+            run_dashboard(selected_port)
         else:
             run_dashboard(selected_port)
+    else:
+        run_dashboard(selected_port)
 
 if __name__ == "__main__":
     try:
