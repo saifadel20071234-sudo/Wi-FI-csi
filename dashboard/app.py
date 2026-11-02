@@ -70,7 +70,7 @@ def load_model_artifacts() -> dict:
 
 @dataclass
 class SerialManager:
-    """A serial connection owned by one browser session, not a global cache."""
+    """A process-level singleton serial connection shared safely across Streamlit sessions."""
 
     connection: object | None = None
     port: str | None = None
@@ -131,11 +131,16 @@ class SerialManager:
         return frames
 
 
+@st.cache_resource
+def get_shared_serial_manager() -> SerialManager:
+    return SerialManager()
+
+
 def initialize_session() -> None:
     st.session_state.setdefault("live_running", False)
     st.session_state.setdefault("tracker", SmoothThermalTracker(room_width=5.0, room_height=5.0, resolution=75))
     st.session_state.setdefault("live_state", LiveCSIState())
-    st.session_state.setdefault("serial_manager", SerialManager())
+    st.session_state["serial_manager"] = get_shared_serial_manager()
 
 
 def start_tracking() -> None:
@@ -146,7 +151,7 @@ def start_tracking() -> None:
 
 def stop_tracking() -> None:
     st.session_state.live_running = False
-    st.session_state.serial_manager.close()
+    get_shared_serial_manager().close()
 
 
 def available_ports() -> list[str]:
@@ -196,7 +201,7 @@ def live_panel() -> None:
     connection_error = None
     if st.session_state.live_running:
         try:
-            manager: SerialManager = st.session_state.serial_manager
+            manager = get_shared_serial_manager()
             manager.ensure(selected_port.strip(), int(baud_rate))
             for frame in manager.read_available():
                 state.ingest(frame, artifacts, artifacts["localizer"])
