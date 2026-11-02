@@ -186,6 +186,22 @@ def run_dashboard(port: str = ""):
     if port:
         env["CSI_DEFAULT_PORT"] = port
         
+    # Clean up any orphaned streamlit processes to avoid COM port locks
+    try:
+        import psutil
+        curr_pid = os.getpid()
+        for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+            if p.info['pid'] != curr_pid:
+                cmd_line = ' '.join(p.info.get('cmdline') or []).lower()
+                if 'streamlit' in cmd_line and 'app.py' in cmd_line:
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+        time.sleep(0.5)
+    except Exception:
+        pass
+
     print("[*] جاري تشغيل خادم Streamlit وفتح المتصفح...")
     print("[*] Dashboard URL: http://localhost:8501")
     print("--------------------------------------------------------------------------------")
