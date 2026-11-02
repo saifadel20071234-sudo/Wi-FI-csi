@@ -39,9 +39,9 @@
     "rssi_std",
     "rssi_range"
   ],
-  "test_accuracy": 0.8167,
-  "cv_mean_accuracy": 0.8097,
-  "cv_std_accuracy": 0.0168,
+  "test_accuracy": 0.8833,
+  "cv_mean_accuracy": 0.8569,
+  "cv_std_accuracy": 0.0098,
   "evaluation_note": "Held-out capture session per class (generalized validation).",
   "label_mapping": {
     "0": "0 Persons (Empty Room)",

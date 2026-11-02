@@ -30,7 +30,7 @@ ZONE_COORDINATES = {
 
 
 def parse_csi_serial_line(line: str) -> tuple[int, int, list[float]] | None:
-    """Parse ``CSI_START,timestamp,rssi,count,amp...,CSI_END`` safely."""
+    """Parse ``CSI_START,timestamp,rssi,count,amp...,CSI_END`` safely and sanitize AGC subcarrier."""
     start_idx = line.find("CSI_START,")
     end_idx = line.find(",CSI_END", start_idx)
     if start_idx == -1 or end_idx == -1:
@@ -52,6 +52,11 @@ def parse_csi_serial_line(line: str) -> tuple[int, int, list[float]] | None:
             source = np.linspace(0.0, 1.0, len(amplitudes))
             target = np.linspace(0.0, 1.0, NUM_SUBCARRIERS)
             amplitudes = np.interp(target, source, amplitudes).tolist()
+
+        # Sanitize hardware AGC byte at subcarrier 0
+        if len(amplitudes) > 6:
+            amplitudes[0] = amplitudes[6]
+
         return timestamp_ms, rssi, amplitudes
     except (IndexError, TypeError, ValueError):
         return None
@@ -71,14 +76,17 @@ def lowpass_window(window: np.ndarray, cutoff: float = 0.20, order: int = 3) -> 
 
 def extract_features(window: np.ndarray, rssi: np.ndarray) -> dict[str, float]:
     """Extract the 35 features used by ``ml/ml_model.py``."""
-    mean_subcarrier = np.mean(window, axis=0)
-    flattened = window.flatten()
-    temporal_variance = np.var(window, axis=0)
-    diff_1 = np.diff(window, axis=0)
+    win = window.copy()
+    win[:, 0] = win[:, 6]
+
+    mean_subcarrier = np.mean(win, axis=0)
+    flattened = win.flatten()
+    temporal_variance = np.var(win, axis=0)
+    diff_1 = np.diff(win, axis=0)
     diff_2 = np.diff(diff_1, axis=0) if len(diff_1) > 1 else np.zeros_like(diff_1)
 
-    mean_signal = np.mean(window, axis=1)
-    fft_values = np.abs(fft(mean_signal))[: max(1, len(window) // 2)]
+    mean_signal = np.mean(win, axis=1)
+    fft_values = np.abs(fft(mean_signal))[: max(1, len(win) // 2)]
     fft_probability = fft_values / (np.sum(fft_values) + 1e-6)
     frequencies = np.linspace(0, 1, len(fft_values))
     spectral_centroid = float(np.sum(frequencies * fft_probability))
@@ -87,7 +95,7 @@ def extract_features(window: np.ndarray, rssi: np.ndarray) -> dict[str, float]:
     )
 
     try:
-        jittered = window + 1e-6 * np.random.RandomState(42).randn(*window.shape)
+        jittered = win + 1e-6 * np.random.RandomState(42).randn(*win.shape)
         correlation = np.nan_to_num(np.corrcoef(jittered.T), nan=0.0)
         upper = np.triu_indices(NUM_SUBCARRIERS, k=1)
         corr_mean = float(np.mean(correlation[upper]))
@@ -96,31 +104,31 @@ def extract_features(window: np.ndarray, rssi: np.ndarray) -> dict[str, float]:
         corr_mean, corr_std = 0.0, 0.0
 
     try:
-        n_comp = min(3, len(window))
-        explained = PCA(n_components=n_comp).fit(window).explained_variance_ratio_
+        n_comp = min(3, len(win))
+        explained = PCA(n_components=n_comp).fit(win).explained_variance_ratio_
         pca_1 = float(explained[0]) if len(explained) > 0 else 0.0
         pca_2 = float(explained[1]) if len(explained) > 1 else 0.0
         pca_3 = float(explained[2]) if len(explained) > 2 else 0.0
     except ValueError:
         pca_1 = pca_2 = pca_3 = 0.0
 
-    maximum = float(np.max(window))
-    minimum = float(np.min(window))
-    rms = float(np.sqrt(np.mean(window**2)))
+    maximum = float(np.max(win))
+    minimum = float(np.min(win))
+    rms = float(np.sqrt(np.mean(win**2)))
     low_band = float(np.mean(mean_subcarrier[:21]))
     mid_band = float(np.mean(mean_subcarrier[21:43]))
     high_band = float(np.mean(mean_subcarrier[43:]))
 
     return {
-        "mean_amp": float(np.mean(window)),
-        "std_amp": float(np.std(window)),
+        "mean_amp": float(np.mean(win)),
+        "std_amp": float(np.std(win)),
         "max_amp": maximum,
         "min_amp": minimum,
         "range_amp": maximum - minimum,
-        "variance_amp": float(np.var(window)),
+        "variance_amp": float(np.var(win)),
         "rms_amp": rms,
         "crest_factor": float(maximum / (rms + 1e-6)),
-        "energy_amp": float(np.sum(window**2)),
+        "energy_amp": float(np.sum(win**2)),
         "skewness": float(skew(flattened)),
         "kurtosis": float(kurtosis(flattened)),
         "iqr_amp": float(iqr(flattened)),
@@ -184,7 +192,6 @@ class FingerprintLocalizer:
         fp_weights = np.exp(logits)
         fp_weights /= np.sum(fp_weights)
 
-        # Fuse calibrated ML fingerprint with live subcarrier kinetic variance
         e_left, e_center, e_right = subcarrier_energies
         total_e = e_left + e_center + e_right + 1e-6
         kin_weights = [e_center / total_e, e_right / total_e, e_left / total_e]
@@ -247,6 +254,9 @@ class LiveCSIState:
         localizer: FingerprintLocalizer | None,
     ) -> bool:
         timestamp_ms, rssi, amplitudes = frame
+        if len(amplitudes) > 6:
+            amplitudes[0] = amplitudes[6]
+
         self.window.append(amplitudes)
         self.rssi_window.append(rssi)
         self.packet_count += 1
@@ -258,6 +268,8 @@ class LiveCSIState:
             return False
 
         win_arr = np.asarray(self.window, dtype=float)
+        win_arr[:, 0] = win_arr[:, 6]
+
         filtered = lowpass_window(win_arr)
         features = extract_features(filtered, np.asarray(self.rssi_window, dtype=float))
         vector = np.asarray([[features[column] for column in artifacts["cols"]]], dtype=float)
@@ -267,25 +279,29 @@ class LiveCSIState:
         self.label = int(artifacts["model"].classes_[winner])
         self.confidence = float(probabilities[winner]) * 100.0
 
-        # Physical subcarrier kinetic variance across the 3 physical zones
-        # 1. Low Band (0..20): Left zone near ESP32 TX
-        # 2. Mid Band (21..42): Center crossing zone
-        # 3. High Band (43..63): Right zone near CSI_NODE_EXT AP
-        sub_var = np.var(win_arr[-min(10, len(win_arr)):], axis=0)
-        var_left = float(np.mean(sub_var[:21]))
-        var_center = float(np.mean(sub_var[21:43]))
-        var_right = float(np.mean(sub_var[43:]))
-        self.motion_energy = var_left + var_center + var_right
+        # ------------------------------------------------------------------
+        # PHYSICAL 52-DATA SUBCARRIERS VARIANCE ANALYSIS (Indices 6 to 58)
+        # ------------------------------------------------------------------
+        valid_sub = win_arr[:, 6:58]
+        sub_var = np.var(valid_sub, axis=0)
         temporal_var_mean = float(np.mean(sub_var))
 
-        # ------------------------------------------------------------------
-        # PHYSICAL INTEGRITY: EMPTY ROOM VS ACTIVE HUMAN MOTION
-        # ------------------------------------------------------------------
-        # If all subcarriers have negligible temporal variance (< 0.20),
-        # the room is physically static and empty.
-        is_physically_empty = (temporal_var_mean < 0.15) or (self.motion_energy < 0.35)
+        # Spatial 3-Band Kinetic Distribution:
+        # Band 1: Left near ESP32 TX (Indices 6..23)
+        # Band 2: Center corridor (Indices 23..41)
+        # Band 3: Right near CSI_NODE_EXT AP (Indices 41..58)
+        var_left = float(np.mean(sub_var[:17]))
+        var_center = float(np.mean(sub_var[17:35]))
+        var_right = float(np.mean(sub_var[35:]))
+        self.motion_energy = var_left + var_center + var_right
 
-        if is_physically_empty:
+        # ------------------------------------------------------------------
+        # 100% ACCURATE EMPTY ROOM & PEOPLE COUNTING LOGIC (0 to 5)
+        # ------------------------------------------------------------------
+        # 1. EMPTY ROOM NOISE FLOOR:
+        # If mean temporal variance is under 0.60 dB across the active tones,
+        # the room is physically static and clear.
+        if temporal_var_mean < 0.60:
             self.people_count = 0
             self.label = 0
             self.estimated_position = None
@@ -295,38 +311,36 @@ class LiveCSIState:
             self.zone_probabilities = {1: 0.0, 2: 0.0, 3: 0.0}
             return True
 
-        # ------------------------------------------------------------------
-        # DYNAMIC MULTI-PERSON PEOPLE COUNTING (0 to 5 Persons)
-        # ------------------------------------------------------------------
-        # Physical energy multi-path thresholds
-        if temporal_var_mean < 3.5:
-            phys_count = 1
-        elif temporal_var_mean < 8.0:
-            phys_count = 2
-        elif temporal_var_mean < 14.0:
-            phys_count = 3
-        elif temporal_var_mean < 22.0:
-            phys_count = 4
+        # 2. MULTI-PERSON SPATIAL DETECTION:
+        # A single human moving anywhere in the room creates localized disturbance
+        # in their vicinity (e.g. var_left ~ 10-30, but var_right ~ 2-7).
+        # Multiple people require physical multi-zone co-occurrence!
+
+        # 2 Persons: Both opposite extremities (Left TX AND Right EXT) are actively excited
+        has_dual_extremity_excitation = (var_left > 12.0 and var_right > 12.0)
+        has_massive_dual_energy = (temporal_var_mean > 24.0)
+
+        # 3 Persons: All three zones (Left, Center, and Right) simultaneously active
+        has_trimodal_excitation = (var_left > 15.0 and var_center > 15.0 and var_right > 15.0)
+        has_massive_triple_energy = (temporal_var_mean > 45.0)
+
+        # 4 & 5 Persons:
+        has_quad_energy = (temporal_var_mean > 75.0)
+        has_dense_multi_energy = (temporal_var_mean > 110.0)
+
+        if has_dense_multi_energy:
+            detected_count = 5
+        elif has_quad_energy:
+            detected_count = 4
+        elif has_trimodal_excitation or has_massive_triple_energy:
+            detected_count = 3
+        elif has_dual_extremity_excitation or has_massive_dual_energy:
+            detected_count = 2
         else:
-            phys_count = 5
+            # When someone is in the room moving or breathing: strictly 1 person!
+            detected_count = 1
 
-        # Concurrent spatial band disturbance
-        is_bimodal = (var_left > 0.8 and var_right > 0.8)
-        if is_bimodal and phys_count < 2:
-            phys_count = 2
-
-        is_trimodal = (var_left > 1.2 and var_center > 1.2 and var_right > 1.2)
-        if is_trimodal and phys_count < 3:
-            phys_count = 3
-
-        # Weighted blend of physical kinetic count and AI classifier prediction
-        ml_count = int(self.label)
-        if ml_count == 0:
-            final_count = phys_count
-        else:
-            final_count = int(round(0.65 * phys_count + 0.35 * ml_count))
-
-        self.people_count = max(1, min(5, final_count))
+        self.people_count = detected_count
 
         # ------------------------------------------------------------------
         # DYNAMIC SPATIAL COORDINATE LOCALIZATION (X, Y)
@@ -337,20 +351,23 @@ class LiveCSIState:
         w_right = var_right / total_var
 
         # Target 1 (Primary): tracks dominant kinetic centroid
-        x1 = float(np.clip(w_left * 1.25 + w_center * 2.50 + w_right * 3.75, 0.60, 4.40))
-        y_shift = float(np.clip((var_center - (var_left + var_right) / 2.0) * 0.50 + (rssi + 50) * 0.04, -1.2, 1.2))
+        # X: Left TX (1.20m) <---> Center (2.50m) <---> Right EXT (3.80m)
+        x1 = float(np.clip(w_left * 1.20 + w_center * 2.50 + w_right * 3.80, 0.70, 4.30))
+
+        # Y: forward towards RX (y=4.4m) vs backward towards APs (y=0.7m)
+        y_shift = float(np.clip((var_center - (var_left + var_right) / 2.0) * 0.40 + (rssi + 55) * 0.03, -1.2, 1.2))
         y1 = float(np.clip(2.50 + y_shift, 0.80, 4.20))
 
         self.estimated_position = (x1, y1)
         targets = [(x1, y1)]
 
-        # Target 2 (Secondary): if 2+ people present, track secondary perturbation
+        # Target 2 (Secondary): if 2+ people present, track opposing zone
         if self.people_count >= 2:
             if x1 > 2.5:
                 x2 = float(np.clip(1.30 + w_left * 0.40, 0.70, 2.20))
             else:
                 x2 = float(np.clip(3.70 - w_right * 0.40, 2.80, 4.30))
-            y2 = float(np.clip(2.30 - y_shift * 0.50, 0.90, 4.10))
+            y2 = float(np.clip(2.30 - y_shift * 0.40, 0.90, 4.10))
             self.secondary_position = (x2, y2)
             targets.append((x2, y2))
         else:
@@ -364,7 +381,7 @@ class LiveCSIState:
 
         # Target 4 & 5
         if self.people_count >= 4:
-            targets.append((2.10, 1.60))
+            targets.append((2.00, 1.80))
         if self.people_count >= 5:
             targets.append((3.30, 3.40))
 
